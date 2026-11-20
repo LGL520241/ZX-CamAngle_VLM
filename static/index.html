@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CamAngle · AI Digital Twin Command Center</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css?v=20261120c" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <div class="scene-bg" aria-hidden="true">
+    <div class="grid-plane"></div>
+    <div class="aurora aurora-a"></div>
+    <div class="aurora aurora-b"></div>
+    <div class="scanline"></div>
+  </div>
+
+  <header class="topbar glass">
+    <div class="brand">
+      <span class="brand-mark"></span>
+      <div class="brand-text">
+        <strong>CamAngle</strong>
+        <span>AI Digital Twin Command Center</span>
+      </div>
+    </div>
+
+    <nav class="nav" aria-label="主导航">
+      <button data-page="dashboard" class="active">
+        <span class="nav-icon">◈</span>总览
+      </button>
+      <button data-page="cameras">
+        <span class="nav-icon">▦</span>相机矩阵
+      </button>
+      <button data-page="captures">
+        <span class="nav-icon">⌁</span>抓图流
+      </button>
+      <button data-page="review">
+        <span class="nav-icon">◎</span>人工复核 <span id="reviewBadge" class="badge">0</span>
+      </button>
+      <button data-page="settings">
+        <span class="nav-icon">⚙</span>控制台
+      </button>
+    </nav>
+
+    <div class="topbar-actions">
+      <div class="system-pulse"><span class="pulse-dot"></span><span id="sysState">系统在线</span></div>
+      <button id="startCycle" class="btn primary glow">▶ 开始一轮巡检</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- 总览 -->
+    <section id="page-dashboard" class="page active">
+      <div class="page-head">
+        <div>
+          <p class="eyebrow">REAL-TIME SITUATION AWARENESS</p>
+          <h1>摄像头角度态势总览</h1>
+        </div>
+        <div class="head-metrics">
+          <span class="hm"><i class="dot-ok"></i>巡检中 <b id="headCycleState">空闲</b></span>
+          <span class="hm"><i class="dot-warn"></i>待复核 <b id="headReview">0</b></span>
+        </div>
+      </div>
+
+      <div class="metric-grid">
+        <article class="metric glass">
+          <div class="metric-top"><span>摄像头总数</span><em>NODES</em></div>
+          <div class="metric-value mono" id="statCameras">-</div>
+          <div class="metric-foot"><span>已注册节点</span></div>
+        </article>
+        <article class="metric glass">
+          <div class="metric-top"><span>累计抓图</span><em>FRAMES</em></div>
+          <div class="metric-value mono" id="statCaptures">-</div>
+          <div class="metric-foot"><span>实时画面帧</span></div>
+        </article>
+        <article class="metric glass ok">
+          <div class="metric-top"><span>合格</span><em>PASS</em></div>
+          <div class="metric-value mono" id="statPass">-</div>
+          <div class="metric-foot"><span>正常视角</span></div>
+        </article>
+        <article class="metric glass bad">
+          <div class="metric-top"><span>不合格</span><em>FAIL</em></div>
+          <div class="metric-value mono" id="statFail">-</div>
+          <div class="metric-foot"><span>明显异常</span></div>
+        </article>
+        <article class="metric glass warn">
+          <div class="metric-top"><span>待复核</span><em>REVIEW</em></div>
+          <div class="metric-value mono" id="statReview">-</div>
+          <div class="metric-foot"><span>AI 不确定</span></div>
+        </article>
+        <article class="metric glass mute">
+          <div class="metric-top"><span>无信号</span><em>OFFLINE</em></div>
+          <div class="metric-value mono" id="statNoSignal">-</div>
+          <div class="metric-foot"><span>设备失联</span></div>
+        </article>
+      </div>
+
+      <div class="dashboard-grid">
+        <section class="panel glass">
+          <div class="panel-head">
+            <h2>AI 判定分布</h2>
+            <span class="panel-tag">LIVE</span>
+          </div>
+          <div class="chart-wrap"><canvas id="decisionChart"></canvas></div>
+        </section>
+
+        <section class="panel glass">
+          <div class="panel-head">
+            <h2>巡检任务引擎</h2>
+            <span class="panel-tag" id="cycleStateTag">IDLE</span>
+          </div>
+          <div id="cycleBox" class="cycle-box">
+            <div class="cycle-big">
+              <strong class="mono" id="cyclePercent">0.0%</strong>
+              <span id="cycleState">空闲</span>
+            </div>
+            <div class="progress-track"><div id="cycleBar" class="progress-bar"></div></div>
+            <div class="cycle-stats">
+              <div><span>进度</span><b class="mono" id="cycleProgress">- / -</b></div>
+              <div><span>速度</span><b class="mono" id="cycleRate">-</b></div>
+              <div><span>预计剩余</span><b class="mono" id="cycleEta">-</b></div>
+            </div>
+            <div class="cycle-times">
+              <span>开始 <b class="mono" id="cycleStarted">-</b></span>
+              <span>结束 <b class="mono" id="cycleFinished">-</b></span>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <section class="panel glass">
+        <div class="panel-head">
+          <h2>实时处理任务</h2>
+          <span class="panel-tag">TRACKING</span>
+        </div>
+        <div id="activeTasks" class="active-tasks">暂无进行中的任务</div>
+      </section>
+
+      <section class="panel glass">
+        <div class="panel-head">
+          <h2>最近抓图</h2>
+          <span class="panel-tag">FEED</span>
+        </div>
+        <div id="recentList" class="strip"></div>
+      </section>
+    </section>
+
+    <!-- 相机矩阵 -->
+    <section id="page-cameras" class="page">
+      <div class="page-head">
+        <div>
+          <p class="eyebrow">CAMERA MATRIX</p>
+          <h1>相机矩阵</h1>
+        </div>
+        <span class="head-metrics"><i class="dot-ok"></i><b id="cameraCountLabel">-</b> 个在线节点</span>
+      </div>
+      <div class="panel glass">
+        <div class="panel-head">
+          <h2>节点列表</h2>
+          <span class="panel-tag">GUANGDONG</span>
+        </div>
+        <div id="cameraGrid" class="camera-grid"></div>
+      </div>
+    </section>
+
+    <!-- 抓图流 -->
+    <section id="page-captures" class="page">
+      <div class="page-head">
+        <div>
+          <p class="eyebrow">CAPTURE STREAM</p>
+          <h1>抓图记录</h1>
+        </div>
+        <div class="filters">
+          <select id="captureFilter">
+            <option value="">全部判定</option>
+            <option value="pass">合格</option>
+            <option value="fail">不合格</option>
+            <option value="review">待复核</option>
+            <option value="no_signal">无信号</option>
+          </select>
+          <span id="captureSummary" class="capture-summary"></span>
+        </div>
+      </div>
+      <div id="captureGrid" class="capture-grid"></div>
+    </section>
+
+    <!-- 人工复核 -->
+    <section id="page-review" class="page">
+      <div class="page-head">
+        <div>
+          <p class="eyebrow">HUMAN-IN-THE-LOOP</p>
+          <h1>人工复核队列</h1>
+        </div>
+        <span class="head-metrics"><i class="dot-warn"></i>AI 不确定项</span>
+      </div>
+      <div id="reviewList" class="review-list"></div>
+    </section>
+
+    <!-- 控制台 -->
+    <section id="page-settings" class="page">
+      <div class="page-head">
+        <div>
+          <p class="eyebrow">CONTROL CONSOLE</p>
+          <h1>运行设置</h1>
+        </div>
+      </div>
+      <div class="panel glass">
+        <div class="form-grid">
+          <label>演示模式 <input id="settingDemo" type="text" disabled /></label>
+          <label>并发数 <input id="settingConcurrency" type="text" disabled /></label>
+          <label>抓图间隔(秒) <input id="settingInterval" type="text" disabled /></label>
+          <label>复核置信度阈值 <input id="settingConfidence" type="number" step="0.01" /></label>
+          <label>倾斜失败阈值(度) <input id="settingRollFail" type="number" step="0.5" /></label>
+          <label>基准旋转阈值(度) <input id="settingBaseRot" type="number" step="0.5" /></label>
+        </div>
+        <div class="actions">
+          <button id="saveSettings" class="btn primary">保存设置</button>
+          <button id="seedDemo" class="btn">重置演示数据</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="detailModal" class="modal hidden">
+    <div class="modal-content glass-strong">
+      <span class="close" data-close="detailModal">&times;</span>
+      <div class="modal-head">
+        <p class="eyebrow">INSPECTION DETAIL</p>
+        <h2>抓图判定详情</h2>
+      </div>
+      <div class="compare">
+        <figure><figcaption>当前抓图</figcaption><img id="detailImage" alt="当前抓图" /></figure>
+        <figure><figcaption>基准图</figcaption><img id="detailBaseline" alt="基准图" /></figure>
+      </div>
+      <div id="detailInfo" class="detail-info"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/static/app.js?v=20261120c"></script>
+</body>
+</html>
