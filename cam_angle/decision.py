@@ -19,6 +19,122 @@ def _module(results: Dict[str, Any], name: str) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+_ANCHOR_EVIDENCE_TERMS: Dict[str, tuple] = {
+    "oil_fryer": ("油锅", "炸锅", "油炸锅"),
+    "cash_register": ("收银机", "收银屏", "收银界面"),
+    "range_hood": ("油烟机", "排烟罩"),
+    "counter": ("操作台", "工作台", "台面", "柜台", "交易台", "收银台", "打包台"),
+    "refrigerator": ("冰箱", "冷柜", "冷藏柜", "冷冻柜"),
+    "display_case": ("展示柜", "保温柜", "保酥柜"),
+    "sink": ("水池", "水槽", "清洗槽"),
+    "prep_area": ("备餐区", "切配区", "腌制区"),
+    "breading_area": ("裹粉台", "裹粉区"),
+    "employee": ("员工", "店员", "工作人员"),
+}
+
+_AREA_EVIDENCE_TERMS = (
+    "入口",
+    "门口",
+    "进出通道",
+    "人行道",
+    "街道",
+    "停车区",
+    "店外活动区",
+    "桌椅",
+    "用餐区",
+    "货架",
+    "仓库",
+    "纸箱",
+    "货物",
+    "储物",
+)
+
+_NO_BUSINESS_ANCHOR_PHRASES = (
+    "无业务锚点",
+    "无完整业务锚点",
+    "无明确业务锚点",
+    "无可用业务区域",
+    "无业务区域",
+    "没有业务锚点",
+    "看不到业务界面",
+    "仅见柜体",
+    "柜体内部",
+    "设备背板",
+    "设备内部",
+)
+
+_WORK_INTERFACE_ANCHOR_IDS = {
+    "oil_fryer",
+    "cash_register",
+    "counter",
+    "refrigerator",
+    "display_case",
+    "sink",
+    "prep_area",
+    "breading_area",
+}
+
+_CEILING_FIXTURE_TERMS = (
+    "天花板",
+    "吊顶",
+    "灯具",
+    "灯管",
+    "排烟罩",
+    "通风管",
+    "空调出风口",
+)
+
+_DINING_EVIDENCE_TERMS = (
+    "桌椅",
+    "餐桌",
+    "用餐区",
+    "顾客活动区",
+    "顾客通道",
+    "用餐通道",
+)
+
+_OUTDOOR_EVIDENCE_TERMS = (
+    "人行道",
+    "街道",
+    "马路",
+    "停车区",
+    "停车线",
+    "黄线",
+    "店外",
+    "门外",
+    "入口",
+    "通道",
+    "电动车",
+    "摩托车",
+    "路沿",
+    "外立面",
+)
+
+_CLEAR_ANCHOR_IDS = {
+    "oil_fryer",
+    "cash_register",
+    "counter",
+    "refrigerator",
+    "display_case",
+    "sink",
+    "prep_area",
+    "breading_area",
+}
+
+
+def _evidence_anchor_ids(semantics: Dict[str, Any]) -> List[str]:
+    """Extract explicitly named business anchors from Qwen's evidence text."""
+    evidence = " ".join(
+        str(semantics.get(key) or "")
+        for key in ("view_evidence", "business_scene_summary")
+    )
+    return sorted(
+        anchor_id
+        for anchor_id, terms in _ANCHOR_EVIDENCE_TERMS.items()
+        if any(term in evidence for term in terms)
+    )
+
+
 def fuse_semantic_decision(
     cv_result: Dict[str, Any],
     semantic_result: Dict[str, Any],
@@ -44,6 +160,7 @@ def fuse_semantic_decision(
     reasons: List[str] = []
     hard_failures: List[str] = []
     reviews: List[str] = []
+    quality_low_texture_warn = False
 
     if quality.get("status") == "fail":
         hard_failures.append(f"quality: {quality.get('reason', '画面不可用')}")
@@ -55,7 +172,17 @@ def fuse_semantic_decision(
     for name in ("quality", "blur"):
         module = _module(modules, name)
         if module.get("status") in {"warn", "unknown"}:
-            reviews.append(f"{name}: {module.get('reason', '证据不足')}")
+            quality_warn_reason = str(module.get("reason") or "")
+            if (
+                name == "quality"
+                and module.get("status") == "warn"
+                and "低纹理" in quality_warn_reason
+            ):
+                # A low-texture scalar can be a false wall warning for flat,
+                # reflective counters. Delay it until semantic coverage is known.
+                quality_low_texture_warn = True
+            else:
+                reviews.append(f"{name}: {quality_warn_reason or '证据不足'}")
 
     occlusion_ratio = float((occlusion.get("metrics") or {}).get("occlusion_ratio", 0.0))
     cv_occlusion_candidate = occlusion.get("status") == "fail"
@@ -97,6 +224,149 @@ def fuse_semantic_decision(
         element["score"] >= review_score
         or view_valid
     )
+    semantic_evidence_text = " ".join(
+        str(semantics.get(key) or "")
+        for key in (
+            "view_evidence",
+            "occlusion_evidence",
+            "business_scene_summary",
+        )
+    )
+    evidence_anchor_ids = _evidence_anchor_ids(semantics)
+    ceiling_fixture_only_evidence = (
+        camera_type in {"kitchen", "cashier", "kitchen_cashier", "other_indoor"}
+        and any(term in semantic_evidence_text for term in _CEILING_FIXTURE_TERMS)
+        and not _WORK_INTERFACE_ANCHOR_IDS.intersection(evidence_anchor_ids)
+    )
+    no_anchor_check_text = (
+        semantic_evidence_text
+        .replace("无业务锚点冲突", "")
+        .replace("无业务锚点问题", "")
+    )
+    no_business_anchor_evidence = any(
+        phrase in no_anchor_check_text
+        for phrase in _NO_BUSINESS_ANCHOR_PHRASES
+    )
+    if no_business_anchor_evidence or ceiling_fixture_only_evidence:
+        target_area_verified = False
+        view_valid = False
+        view_issue = "wall_ceiling" if ceiling_fixture_only_evidence else "unrecognized"
+        subject_coverage = "none"
+        monitoring_subject_affected = True
+        semantics["camera_type"] = "unknown"
+        semantics["target_area_visible"] = False
+        semantics["view_valid"] = False
+        semantics["view_issue"] = view_issue
+        semantics["subject_coverage"] = "none"
+        semantics["monitoring_subject_affected"] = True
+        camera_type = "unknown"
+
+    outdoor_evidence_hits = {
+        term for term in _OUTDOOR_EVIDENCE_TERMS
+        if term in semantic_evidence_text
+    }
+    outdoor_anchor_clear = (
+        semantic_available
+        and camera_type == "unknown"
+        and semantics.get("outdoor_view") == "proper"
+        and len(outdoor_evidence_hits) >= 2
+        and not no_business_anchor_evidence
+        and vlm_occlusion not in {"severe", "unknown"}
+        and not semantic_occlusion_affects_subject
+        and semantic_blur not in {"severe", "unknown"}
+    )
+    if outdoor_anchor_clear:
+        camera_type = "store_outdoor"
+        vlm_outdoor = True
+        target_area_verified = True
+        view_valid = True
+        view_issue = "proper"
+        subject_coverage = "medium"
+        monitoring_subject_affected = False
+        semantics["camera_type"] = camera_type
+        semantics["is_store_outdoor"] = True
+        semantics["target_area_visible"] = True
+        semantics["view_valid"] = True
+        semantics["view_issue"] = "proper"
+        semantics["subject_coverage"] = subject_coverage
+        semantics["monitoring_subject_affected"] = False
+
+    clear_anchor_evidence_text = str(semantics.get("view_evidence") or "")
+    clear_anchor_language = (
+        any(term in clear_anchor_evidence_text for term in ("清晰", "完整", "可辨"))
+        and not any(
+            term in clear_anchor_evidence_text
+            for term in ("模糊", "虚焦", "不清", "不足", "局部", "边缘", "遮挡")
+        )
+    )
+    clear_anchor_count = len(
+        set(element["hit_ids"]).intersection(_CLEAR_ANCHOR_IDS)
+    )
+    contradictory_clear_anchor = (
+        semantic_available
+        and camera_type in {"kitchen", "cashier", "kitchen_cashier"}
+        and bool(semantics.get("target_area_visible"))
+        and subject_coverage in {"medium", "large"}
+        and vlm_occlusion not in {"severe", "unknown"}
+        and not semantic_occlusion_affects_subject
+        and clear_anchor_language
+        and clear_anchor_count >= 2
+    )
+    if contradictory_clear_anchor:
+        # Evidence naming multiple complete anchors is more specific than a
+        # generic severe-blur label. Reconcile the contradictory enum fields.
+        semantic_blur = "slight"
+        semantic_blur_scope = "localized"
+        monitoring_subject_affected = False
+        operation_visibility = "not_applicable"
+        view_valid = True
+        view_issue = "proper"
+        semantics["blur"] = semantic_blur
+        semantics["blur_scope"] = semantic_blur_scope
+        semantics["monitoring_subject_affected"] = False
+        semantics["operation_visibility"] = operation_visibility
+        semantics["view_valid"] = True
+        semantics["view_issue"] = "proper"
+
+    dining_layout_clear = (
+        semantic_available
+        and camera_type == "dining"
+        and bool(semantics.get("target_area_visible"))
+        and any(
+            term in semantic_evidence_text
+            for term in _DINING_EVIDENCE_TERMS
+        )
+        and not no_business_anchor_evidence
+        and vlm_occlusion not in {"severe", "unknown"}
+        and not semantic_occlusion_affects_subject
+        and semantic_occlusion_scope not in {"critical", "unknown"}
+        and not monitoring_subject_affected
+        and semantic_blur not in {"severe", "unknown"}
+        and not (
+            semantic_blur_scope == "global"
+            and semantic_blur != "none"
+        )
+        and (vlm_conf <= 0.0 or vlm_conf >= 0.55)
+    )
+    if dining_layout_clear:
+        view_valid = True
+        view_issue = "proper"
+        if subject_coverage in {"none", "small"}:
+            subject_coverage = "medium"
+        vlm_occlusion = "none"
+        semantic_occlusion_ratio = 0.0
+        semantic_occlusion_scope = "none"
+        semantic_occlusion_affects_subject = False
+        monitoring_subject_affected = False
+        semantics["view_valid"] = True
+        semantics["view_issue"] = "proper"
+        semantics["subject_coverage"] = subject_coverage
+        semantics["occlusion"] = "none"
+        semantics["occlusion_area_ratio"] = 0.0
+        semantics["occlusion_scope"] = "none"
+        semantics["occlusion_affects_subject"] = False
+        semantics["monitoring_subject_affected"] = False
+
     blocking_occlusion = verified_obstruction or (
         semantic_occlusion_scope in {"critical", "unknown"}
         and (
@@ -132,7 +402,11 @@ def fuse_semantic_decision(
         ):
             blocking_occlusion = False
         central_blur_status = central_blur.get("status")
-        if blocking_blur and central_blur_status == "pass":
+        if (
+            blocking_blur
+            and central_blur_status == "pass"
+            and not unusable_severe_blur
+        ):
             blocking_blur = False
         elif (
             blocking_blur
@@ -152,13 +426,108 @@ def fuse_semantic_decision(
     else:
         business_subject_visible = False
 
+    storage_evidence_text = " ".join(
+        str(semantics.get(key) or "")
+        for key in (
+            "view_evidence",
+            "occlusion_evidence",
+            "business_scene_summary",
+        )
+    )
+    storage_layout_clear = (
+        semantic_available
+        and camera_type == "storage"
+        and bool(semantics.get("target_area_visible"))
+        and not no_business_anchor_evidence
+        and any(
+            term in storage_evidence_text
+            for term in ("仓库", "货架", "纸箱", "货物", "储物")
+        )
+        and vlm_occlusion not in {"severe", "unknown"}
+        and not semantic_occlusion_affects_subject
+        and semantic_occlusion_scope not in {"critical", "unknown"}
+        and not monitoring_subject_affected
+        and semantic_blur not in {"severe", "unknown"}
+        and not (
+            semantic_blur_scope == "global"
+            and semantic_blur != "none"
+        )
+        and (vlm_conf <= 0.0 or vlm_conf >= 0.55)
+    )
+    if storage_layout_clear:
+        # Boxes and stock are the monitored content of a storage room, not a
+        # middle layer. Normalize contradictory "small/unknown" fields only
+        # when the model also confirms no actual subject impact.
+        view_valid = True
+        view_issue = "proper"
+        if subject_coverage in {"none", "small"}:
+            subject_coverage = "medium"
+        vlm_occlusion = "none"
+        semantic_occlusion_ratio = 0.0
+        semantic_occlusion_scope = "none"
+        semantic_occlusion_affects_subject = False
+        monitoring_subject_affected = False
+        semantics["target_area_visible"] = True
+        semantics["view_valid"] = True
+        semantics["view_issue"] = "proper"
+        semantics["subject_coverage"] = subject_coverage
+        semantics["occlusion"] = "none"
+        semantics["occlusion_area_ratio"] = 0.0
+        semantics["occlusion_scope"] = "none"
+        semantics["occlusion_affects_subject"] = False
+        semantics["monitoring_subject_affected"] = False
+
+    semantic_anchor_ids = sorted(
+        set(evidence_anchor_ids) | set(element["hit_ids"])
+    )
+    expected_non_employee = {
+        anchor_id
+        for anchor_id in element["expected_ids"]
+        if anchor_id != "employee"
+    }
+    has_specific_workspace_anchor = bool(
+        expected_non_employee.intersection(semantic_anchor_ids)
+    )
+    evidence_text = " ".join(
+        str(semantics.get(key) or "")
+        for key in ("view_evidence", "business_scene_summary")
+    )
+    has_area_anchor = any(term in evidence_text for term in _AREA_EVIDENCE_TERMS)
+    has_required_anchor = (
+        has_specific_workspace_anchor
+        if camera_type in {"kitchen", "cashier", "kitchen_cashier"}
+        else has_area_anchor
+    )
+    semantic_coverage_clear = (
+        semantic_available
+        and has_required_anchor
+        and bool(semantics.get("target_area_visible"))
+        and view_valid
+        and view_issue == "proper"
+        and subject_coverage in {"medium", "large"}
+        and not monitoring_subject_affected
+        and vlm_occlusion not in {"severe", "unknown"}
+        and not semantic_occlusion_affects_subject
+        and semantic_blur not in {"severe", "unknown"}
+        and not (
+            semantic_blur_scope == "global"
+            and semantic_blur != "none"
+        )
+        and operation_visibility != "obscured"
+        and (vlm_conf <= 0.0 or vlm_conf >= 0.55)
+    )
+    if quality_low_texture_warn and not semantic_coverage_clear:
+        reviews.append(
+            f"quality: {quality.get('reason', '画面低纹理，证据不足')}"
+        )
+
     invalid_subject_view = (
         semantic_available
         and not target_area_verified
         and element["score"] < review_score
         and (
             monitoring_subject_affected
-            or vlm_occlusion in {"partial", "severe", "unknown"}
+            or vlm_occlusion in {"partial", "severe"}
             or (semantic_blur == "severe" and semantic_blur_scope == "global")
         )
     )
@@ -173,7 +542,7 @@ def fuse_semantic_decision(
         and subject_coverage in {"none", "small"}
         and vlm_occlusion in {"partial", "severe"}
         and semantic_occlusion_ratio >= 0.15
-        and view_issue in {"obstructed", "too_close", "wrong_area", "unknown"}
+        and view_issue in {"obstructed", "too_close", "wrong_area"}
         and element["score"] < 0.30
     )
     if unusable_partial_view:
@@ -293,8 +662,21 @@ def fuse_semantic_decision(
         reviews.append("occlusion: 目标区域可见，但遮挡影响仍无法确认")
         semantic_status = "warn"
     elif camera_type in {"dining", "storage", "other_indoor"}:
-        # 通道、仓库、用餐区和其他室内区域只看主体与画质，不做元素评分。
-        semantic_status = "pass"
+        # These scenes do not require element scoring, but they still need a
+        # consistent visible/valid/proper coverage result.
+        if (
+            bool(semantics.get("target_area_visible"))
+            and view_valid
+            and view_issue == "proper"
+            and subject_coverage in {"medium", "large"}
+        ):
+            semantic_status = "pass"
+        else:
+            reviews.append(
+                f"camera_view: 场景覆盖字段不一致（{view_issue}，"
+                f"有效覆盖={view_valid}，覆盖={subject_coverage}），需人工复核"
+            )
+            semantic_status = "warn"
     elif not target_area_verified:
         reviews.append("semantic: Qwen 未确认拍摄到目标业务区域")
         semantic_status = "warn"
@@ -310,6 +692,11 @@ def fuse_semantic_decision(
                 "低于 55%，需人工复核"
             )
             semantic_status = "warn"
+    elif semantic_coverage_clear:
+        # Qwen can identify a complete workspace in evidence while omitting
+        # the redundant element list. Treat that as clear coverage rather
+        # than sending an otherwise valid frame to manual review.
+        semantic_status = "pass"
     else:
         reviews.append(
             f"element_match: 业务元素命中率仅 {element['score']:.0%}，"
@@ -345,6 +732,14 @@ def fuse_semantic_decision(
         "angle_evidence": semantics.get("angle_evidence", ""),
         "occlusion_evidence": semantics.get("occlusion_evidence", ""),
         "visible_elements": semantics.get("visible_elements", []),
+        "anchor_evidence_ids": semantic_anchor_ids,
+        "business_anchor_confirmed": semantic_coverage_clear,
+        "storage_layout_confirmed": storage_layout_clear,
+        "no_business_anchor_evidence": no_business_anchor_evidence,
+        "ceiling_fixture_only_evidence": ceiling_fixture_only_evidence,
+        "contradictory_clear_anchor": contradictory_clear_anchor,
+        "dining_layout_confirmed": dining_layout_clear,
+        "outdoor_anchor_confirmed": outdoor_anchor_clear,
         "metrics": semantic_result.get("metrics", {}),
     }
     element_applicable = camera_type not in {
@@ -357,17 +752,31 @@ def fuse_semantic_decision(
         "status": (
             "skipped"
             if not element_applicable
-            else "pass" if element["score"] >= review_score else "warn"
+            else (
+                "pass"
+                if element["score"] >= review_score or semantic_coverage_clear
+                else "warn"
+            )
         ),
         "confidence": round(min(1.0, max(vlm_conf, element["score"])), 3),
         "reason": (
             "当前场景不参与元素命中评分"
             if not element_applicable
-            else f"命中 {element['hit_count']} 个业务元素："
-            + ("、".join(element["hit_labels"]) if element["hit_labels"] else "无")
+            else (
+                "文字证据确认完整业务锚点："
+                + "、".join(semantic_anchor_ids)
+                if semantic_coverage_clear and element["score"] < review_score
+                else f"命中 {element['hit_count']} 个业务元素："
+                + (
+                    "、".join(element["hit_labels"])
+                    if element["hit_labels"]
+                    else "无"
+                )
+            )
         ),
         "score": element["score"],
         "applicable": element_applicable,
+        "anchor_evidence_ids": semantic_anchor_ids,
         **element,
     }
     # exposure fail can be found in quality, but VLM still documents the scene.
@@ -471,6 +880,14 @@ def fuse_semantic_decision(
         "element_score": element["score"],
         "element_hit_count": element["hit_count"],
         "element_hit_ids": element["hit_ids"],
+        "anchor_evidence_ids": semantic_anchor_ids,
+        "business_anchor_confirmed": semantic_coverage_clear,
+        "storage_layout_confirmed": storage_layout_clear,
+        "no_business_anchor_evidence": no_business_anchor_evidence,
+        "ceiling_fixture_only_evidence": ceiling_fixture_only_evidence,
+        "contradictory_clear_anchor": contradictory_clear_anchor,
+        "dining_layout_confirmed": dining_layout_clear,
+        "outdoor_anchor_confirmed": outdoor_anchor_clear,
     })
     return {
         "decision": decision,

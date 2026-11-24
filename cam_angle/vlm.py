@@ -279,6 +279,7 @@ OPERATION_VERIFY_SCHEMA: Dict[str, Any] = {
 
 OBSTRUCTION_VERIFY_PROMPT = """只做镜头空间可用性复核。
 第一步确定主业务工作区，并估计目标区外接框占整幅画面的比例 target_area_ratio。第二步识别位于镜头与工作区之间、视觉上明显更近的中间层区域，并按并集估计它占整幅画面的比例 foreground_area_ratio，以及覆盖目标工作区的比例 target_overlap_ratio。比例字段只作证据，不能单独决定 scene_usable。
+如果 target_area_ratio<=0.10，且业务区只位于画面边缘或描述为部分、局部、仅见，即使没有检测到独立中间层，也说明整幅画面被墙体、柜体、设备外壳或棚面占据，必须填 narrow_side_view=true 或 core_area_split=true，并判 scene_usable=false、lens_obstructed=true。
 场景自身的边界、墙体、背景以及与目标同平面的柜台、墙面固定菜单屏/广告屏、背板、金属、玻璃和设备表面不属于中间层。墙面或柜台后方的固定屏不能仅因面积大而判作遮挡。窄长线状或透明边缘如果只跨过画面而没有连续遮住核心工作区，不单独构成 major obstruction。
 只有中间层实际遮住核心设备、人员手部动作或完整工位，导致业务活动无法继续监控时，才判 scene_usable=false。面积较大但核心活动仍可辨认时，scene_usable=true。
 专用摄像头可以只监控一个工位，不要求目标位于中央或占画面三分之一。只要完整工位清楚可监控，occupies_primary_view=true、narrow_side_view=false，即使目标位于左侧或右侧。
@@ -289,7 +290,7 @@ OBSTRUCTION_VERIFY_PROMPT = """只做镜头空间可用性复核。
 雨棚、遮阳伞、帆布、篷布等表面即使属于正常设施，只要紧贴镜头并占据画面主体，只在边缘露出少量目标区域，也应判 scene_usable=false。
 密集网格、笼架、护栏或筛网形成大面积连续前景屏障时，即使能部分透视，只要把业务区挤到一侧或明显削弱核心区域可读性，也应判 scene_usable=false。单根细线或少量稀疏线条才可作为局部干扰。
 如果近镜头物体从上方和下方同时侵入画面，只剩中间一条窄窗口能看到业务区，即使设备局部可见，也属于多面前景夹击，应判 scene_usable=false。
-近镜头立柱、门框或招牌形成连续纵向屏障，把业务区切成窄条时，也应判 scene_usable=false。
+近镜头移动物体或非固定结构形成连续纵向屏障，把业务区切成窄条时，应判 scene_usable=false。但固定立柱、门框或固定隔断只是分割画面时，只要另一侧仍有一个完整业务工作区、完整操作面或完整交易面清楚可监控，就不属于中层遮挡，scene_usable=true；只有分割后没有任何完整业务单元可读时才失败。
 后厨、收银等作业场景必须包含可用工作平面、设备正面/操作界面、交易区或实际作业区域。只看到设备顶部、背面、外壳、布线、墙面、天花板或空地面时，按无业务锚点处理，scene_usable=false。
 设备碎片、局部柜台、二维码/宣传贴纸、菜单板、墙角和空地面不能作为后厨/收银业务锚点。至少要有一个完整可用的操作面、完整工作台面、完整交易面或人员实际作业区域，否则 scene_usable=false。
 设备内部机械、电机、接线、维护舱、电气控制腔和设备顶盖不属于业务界面，不能命中设备元素，也不能据此判 scene_usable=true。
@@ -299,7 +300,10 @@ OBSTRUCTION_VERIFY_PROMPT = """只做镜头空间可用性复核。
 员工和顾客通常是监控业务主体，不是中层遮挡物；但如果人员形成横跨画面的大面积模糊前景带，遮住操作台、核心动作或主要业务区域，应按严重遮挡处理，scene_usable=false。
 吊顶附近的线缆、管道、吊扇、灯具和支架横穿画面上方时，如果操作台、人员手部和核心作业面仍然清楚，不计入中层遮挡，也不能按线缆外接范围估计遮挡比例。
 如果画面中至少一名员工的手部、手臂和具体工作动作清楚可见，且业务工作区仍能识别，前景网罩、边框、立柱或局部结构不能单独构成 narrow_side_view 或 scene_usable=false；只有核心业务活动确实无法观察时才判不可用。
-物体名称、颜色和材质不影响判断。只有独立中间层实际盖住核心操作、把完整工位切成碎片，或业务目标本身不可识别时，scene_usable=false；否则 scene_usable=true。目标居中程度、画面占比、目标偏侧和固定结构面积均不能单独决定失败。
+物体名称、颜色和材质不影响判断。中间层是否成立只看空间关系：画面中明显更近、连续覆盖核心操作面的箱体、薄膜、包装、设备盖板或其他前景区域，就是 middle_layer_intrusion=true，不能因为后方仍能看到员工、局部设备或边缘纹理而改成 false。
+如果前景层明显覆盖目标且只留下边缘或窄带可读区域，必须填 affects_core_area=true、lens_obstructed=true、scene_usable=false；员工仍能露出手部或背景局部清晰，不能抵消完整工位已被切断。
+foreground_area_ratio>=0.30 且 target_overlap_ratio>=0.20，或大面积半透明薄膜/近景包装覆盖目标时，不能判“无中间层”。只有独立前景没有覆盖核心工作区、完整操作面和人员动作仍连续可辨时，才可 scene_usable=true。
+目标居中程度、画面占比、目标偏侧和固定结构面积均不能单独决定失败，但目标只剩边缘局部、无法完成持续监控时属于失败。
 输出中文 evidence，并严格按结构输出。"""
 
 OBSTRUCTION_VERIFY_SCHEMA: Dict[str, Any] = {
@@ -375,6 +379,193 @@ def _as_float(value: Any, default: float = 0.0) -> float:
 def _choice(value: Any, choices: Iterable[str], default: str) -> str:
     text = str(value or "").strip().lower().replace("-", "_")
     return text if text in set(choices) else default
+
+
+def normalize_obstruction_verification(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize the verifier's geometry flags into a consistent conclusion."""
+    model_scene_usable = _as_bool(raw.get("scene_usable"), default=True)
+    foreground_ratio = _as_float(raw.get("foreground_area_ratio"))
+    target_overlap_ratio = _as_float(raw.get("target_overlap_ratio"))
+    target_area_ratio = _as_float(raw.get("target_area_ratio"))
+    core_area_split = _as_bool(raw.get("core_area_split"))
+    narrow_side_view = _as_bool(raw.get("narrow_side_view"))
+    occupies_primary_view = _as_bool(
+        raw.get("occupies_primary_view"), default=True
+    )
+    target_position = _choice(
+        raw.get("target_position"),
+        ["center", "lower_center", "left_side", "right_side", "upper", "other"],
+        "other",
+    )
+    target_description = str(raw.get("target_area_description") or "")
+    verifier_evidence = str(raw.get("evidence") or "")
+    fixed_plane_evidence = (
+        any(
+            term in (target_description + " " + verifier_evidence)
+            for term in (
+                "固定结构",
+                "非中间层",
+                "广告屏",
+                "广告牌",
+                "菜单屏",
+                "背板",
+                "墙壁",
+                "后方",
+                "玻璃罩",
+            )
+        )
+        and any(
+            term in verifier_evidence
+            for term in (
+                "不构成遮挡",
+                "未遮挡",
+                "未被遮挡",
+                "核心操作面仍清晰可见",
+                "操作动作完整可辨",
+                "员工手部动作仍可辨识",
+                "仍可辨识",
+                "仍能辨识",
+                "仍清晰",
+                "核心工作区未被切断",
+            )
+        )
+    ) or (
+        "支架" in verifier_evidence
+        and "不构成遮挡" in verifier_evidence
+    )
+    complete_business_unit = any(
+        term in (target_description + " " + verifier_evidence)
+        for term in (
+            "完整业务工作区",
+            "完整操作面",
+            "完整工作台面",
+            "完整交易面",
+            "完整业务单元",
+        )
+    )
+    fixed_divider_exemption = (
+        any(
+            term in verifier_evidence
+            for term in ("立柱", "柱子", "固定隔断")
+        )
+        and complete_business_unit
+    )
+    fragment_terms = (
+        "只剩",
+        "仅见",
+        "边缘小角",
+        "碎片",
+        "只露出",
+        "仅剩",
+        "局部边缘",
+        "无法确认完整",
+    )
+    complete_unit_language = any(
+        term in (target_description + " " + verifier_evidence)
+        for term in (
+            "完整操作面",
+            "完整工作台面",
+            "完整交易面",
+            "完整业务单元",
+            "完整工位",
+        )
+    )
+    explicitly_not_narrow = any(
+        term in verifier_evidence
+        for term in (
+            "未构成 narrow_side_view",
+            "未被切断",
+            "核心业务区域未被切断",
+            "完整业务单元仍可监控",
+            "仍可完整监控",
+        )
+    )
+    target_is_fragment = (
+        any(
+            term in (target_description + " " + verifier_evidence)
+            for term in fragment_terms
+        )
+        and not complete_unit_language
+        and not explicitly_not_narrow
+    )
+    tiny_edge_target = bool(
+        target_area_ratio <= 0.10
+        and not occupies_primary_view
+        and target_is_fragment
+    )
+    middle_layer_intrusion = _as_bool(raw.get("middle_layer_intrusion"))
+    if (
+        foreground_ratio >= 0.20
+        and target_overlap_ratio >= 0.20
+        and not fixed_plane_evidence
+        and not fixed_divider_exemption
+    ):
+        # foreground_area_ratio describes the layer between the lens and
+        # target. A substantial overlap therefore proves middle-layer contact,
+        # even if the model labels the layer as ordinary scene content.
+        middle_layer_intrusion = True
+
+    # Geometry that no usable-verdict text can override: the business area is
+    # only a tiny edge fragment, a narrow side strip, or explicitly split.
+    hard_geometry_failure = bool(
+        tiny_edge_target or narrow_side_view or core_area_split
+    )
+
+    # A fixed plane or fixed divider that leaves one complete business unit
+    # readable is an explicit exemption, not an obstruction.
+    if (fixed_plane_evidence or fixed_divider_exemption) and not tiny_edge_target:
+        middle_layer_intrusion = False
+        affects_core_area = False
+        lens_obstructed = False
+        scene_usable = True
+    elif hard_geometry_failure:
+        affects_core_area = True
+        lens_obstructed = True
+        scene_usable = False
+    else:
+        # The verifier is instructed that target position, screen share and
+        # ratios cannot by themselves decide failure. Honour its structured
+        # verdict instead of overriding it with those same heuristics.
+        scene_usable = model_scene_usable
+        lens_obstructed = not model_scene_usable
+        affects_core_area = bool(
+            middle_layer_intrusion
+            and (
+                target_overlap_ratio >= 0.20
+                or not model_scene_usable
+            )
+        )
+    return {
+        "target_area_description": target_description[:240],
+        "model_scene_usable": model_scene_usable,
+        "middle_layer_intrusion": middle_layer_intrusion,
+        "target_area_ratio": target_area_ratio,
+        "occupies_primary_view": occupies_primary_view,
+        "target_position": target_position,
+        "narrow_side_view": narrow_side_view,
+        "foreground_area_ratio": foreground_ratio,
+        "target_overlap_ratio": target_overlap_ratio,
+        "obstruction_area_ratio": target_overlap_ratio,
+        "core_area_split": core_area_split,
+        "scene_usable": scene_usable,
+        "lens_obstructed": lens_obstructed,
+        "affects_core_area": affects_core_area,
+        "obstruction_type": _choice(
+            raw.get("obstruction_type"),
+            [
+                "none",
+                "plastic_bag",
+                "packaging",
+                "box",
+                "pillar",
+                "ceiling_fixture",
+                "equipment",
+                "other",
+            ],
+            "none",
+        ),
+        "evidence": verifier_evidence[:400],
+    }
 
 
 def normalize_semantic(raw: Dict[str, Any]) -> Dict[str, Any]:
@@ -785,62 +976,9 @@ class QwenSemanticClient:
         payload = response.json()
         choice = payload["choices"][0]
         raw = parse_json_content(choice["message"]["content"])
-        foreground_ratio = _as_float(raw.get("foreground_area_ratio"))
-        target_overlap_ratio = _as_float(raw.get("target_overlap_ratio"))
-        target_area_ratio = _as_float(raw.get("target_area_ratio"))
-        core_area_split = _as_bool(raw.get("core_area_split"))
-        scene_usable = _as_bool(raw.get("scene_usable"), default=True)
-        middle_layer_intrusion = _as_bool(raw.get("middle_layer_intrusion"))
-        occupies_primary_view = _as_bool(
-            raw.get("occupies_primary_view"), default=True
-        )
-        target_position = _choice(
-            raw.get("target_position"),
-            ["center", "lower_center", "left_side", "right_side", "upper", "other"],
-            "other",
-        )
-        narrow_side_view = _as_bool(raw.get("narrow_side_view"))
+        normalized = normalize_obstruction_verification(raw)
         return {
-            "target_area_description": str(raw.get("target_area_description") or "")[:240],
-            "middle_layer_intrusion": middle_layer_intrusion,
-            "target_area_ratio": target_area_ratio,
-            "occupies_primary_view": occupies_primary_view,
-            "target_position": target_position,
-            "narrow_side_view": narrow_side_view,
-            "foreground_area_ratio": foreground_ratio,
-            "target_overlap_ratio": target_overlap_ratio,
-            "obstruction_area_ratio": target_overlap_ratio,
-            "core_area_split": core_area_split,
-            "scene_usable": scene_usable,
-            "lens_obstructed": bool(
-                middle_layer_intrusion
-                and (
-                    narrow_side_view
-                    or target_position in {"left_side", "right_side"}
-                    or not occupies_primary_view
-                    or target_area_ratio < 0.25
-                    or target_overlap_ratio >= 0.20
-                    or core_area_split
-                )
-            ),
-            "affects_core_area": bool(
-                narrow_side_view or target_overlap_ratio >= 0.20 or core_area_split
-            ),
-            "obstruction_type": _choice(
-                raw.get("obstruction_type"),
-                [
-                    "none",
-                    "plastic_bag",
-                    "packaging",
-                    "box",
-                    "pillar",
-                    "ceiling_fixture",
-                    "equipment",
-                    "other",
-                ],
-                "none",
-            ),
-            "evidence": str(raw.get("evidence") or "")[:400],
+            **normalized,
             "finish_reason": choice.get("finish_reason"),
             "usage": payload.get("usage") or {},
         }
@@ -1063,6 +1201,7 @@ class QwenSemanticClient:
                             "kitchen",
                             "cashier",
                             "kitchen_cashier",
+                            "dining",
                             "storage",
                             "other_indoor",
                         }

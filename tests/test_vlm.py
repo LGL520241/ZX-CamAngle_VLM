@@ -14,6 +14,7 @@ from cam_angle.decision import fuse_semantic_decision
 from cam_angle.vlm import (
     CANONICAL_ELEMENTS,
     RESPONSE_SCHEMA,
+    normalize_obstruction_verification,
     normalize_semantic,
     parse_json_content,
     repair_truncated_json,
@@ -164,6 +165,138 @@ class SemanticNormalizationTests(unittest.TestCase):
         self.assertTrue(counter["visible"])
         self.assertGreater(score_elements(result)["score"], 0)
 
+    def test_large_foreground_keeps_explicit_scene_usable_verdict(self):
+        result = normalize_obstruction_verification({
+            "foreground_area_ratio": 0.45,
+            "target_overlap_ratio": 0.35,
+            "target_area_ratio": 0.25,
+            "middle_layer_intrusion": False,
+            "occupies_primary_view": True,
+            "narrow_side_view": False,
+            "core_area_split": False,
+            "scene_usable": True,
+            "target_position": "right_side",
+            "obstruction_type": "none",
+            "evidence": "前方箱体占据下部，后方员工可见",
+        })
+        self.assertTrue(result["middle_layer_intrusion"])
+        self.assertTrue(result["affects_core_area"])
+        self.assertFalse(result["lens_obstructed"])
+        self.assertTrue(result["scene_usable"])
+
+    def test_obstruction_small_peripheral_foreground_remains_usable(self):
+        result = normalize_obstruction_verification({
+            "foreground_area_ratio": 0.10,
+            "target_overlap_ratio": 0.05,
+            "target_area_ratio": 0.50,
+            "middle_layer_intrusion": False,
+            "occupies_primary_view": True,
+            "narrow_side_view": False,
+            "core_area_split": False,
+            "scene_usable": True,
+            "target_position": "center",
+            "obstruction_type": "none",
+            "evidence": "边缘轻微干扰",
+        })
+        self.assertFalse(result["middle_layer_intrusion"])
+        self.assertFalse(result["lens_obstructed"])
+        self.assertTrue(result["scene_usable"])
+
+    def test_tiny_partial_target_edge_is_unusable_without_middle_layer(self):
+        result = normalize_obstruction_verification({
+            "target_area_description": "画面左下角仅见部分操作台面与水槽",
+            "foreground_area_ratio": 0.95,
+            "target_overlap_ratio": 0.05,
+            "target_area_ratio": 0.05,
+            "middle_layer_intrusion": False,
+            "occupies_primary_view": False,
+            "target_position": "left_side",
+            "narrow_side_view": False,
+            "core_area_split": False,
+            "scene_usable": True,
+            "obstruction_type": "none",
+            "evidence": "其余画面为大面积固定平面，业务区只剩底部局部边缘",
+        })
+        self.assertTrue(result["lens_obstructed"])
+        self.assertTrue(result["affects_core_area"])
+        self.assertFalse(result["scene_usable"])
+
+    def test_fixed_ad_screen_is_not_a_middle_layer(self):
+        result = normalize_obstruction_verification({
+            "target_area_description": "收银台和员工操作区",
+            "foreground_area_ratio": 0.45,
+            "target_overlap_ratio": 0.25,
+            "target_area_ratio": 0.32,
+            "middle_layer_intrusion": True,
+            "occupies_primary_view": True,
+            "target_position": "left_side",
+            "narrow_side_view": False,
+            "core_area_split": False,
+            "scene_usable": False,
+            "obstruction_type": "none",
+            "evidence": "广告屏为固定结构，非中间层，不构成遮挡；员工操作动作完整可辨。",
+        })
+        self.assertFalse(result["middle_layer_intrusion"])
+        self.assertFalse(result["lens_obstructed"])
+        self.assertTrue(result["scene_usable"])
+
+    def test_near_lens_bracket_not_blocking_visible_core_is_not_obstruction(self):
+        result = normalize_obstruction_verification({
+            "target_area_description": "右侧收银台和操作面",
+            "foreground_area_ratio": 0.45,
+            "target_overlap_ratio": 0.25,
+            "target_area_ratio": 0.25,
+            "middle_layer_intrusion": True,
+            "occupies_primary_view": False,
+            "target_position": "right_side",
+            "narrow_side_view": False,
+            "core_area_split": False,
+            "scene_usable": False,
+            "obstruction_type": "none",
+            "evidence": "左侧设备支架不构成遮挡，核心操作面仍清晰可见，员工手部未被遮挡。",
+        })
+        self.assertFalse(result["middle_layer_intrusion"])
+        self.assertFalse(result["lens_obstructed"])
+        self.assertTrue(result["scene_usable"])
+
+    def test_fixed_background_with_visible_employee_hands_is_not_middle_layer(self):
+        result = normalize_obstruction_verification({
+            "target_area_description": "员工在收银台后操作，操作台面完整可见",
+            "foreground_area_ratio": 0.35,
+            "target_overlap_ratio": 0.25,
+            "target_area_ratio": 0.15,
+            "middle_layer_intrusion": True,
+            "occupies_primary_view": False,
+            "target_position": "left_side",
+            "narrow_side_view": False,
+            "core_area_split": False,
+            "scene_usable": False,
+            "obstruction_type": "none",
+            "evidence": "右侧墙壁与收银台后方广告牌视觉上更近，但员工手部动作仍可辨识。",
+        })
+        self.assertFalse(result["middle_layer_intrusion"])
+        self.assertFalse(result["lens_obstructed"])
+        self.assertTrue(result["scene_usable"])
+
+    def test_fixed_divider_with_complete_business_unit_is_not_an_obstruction(self):
+        result = normalize_obstruction_verification({
+            "target_area_description": "右侧为完整业务工作区，含操作台、展示柜和员工",
+            "foreground_area_ratio": 0.35,
+            "target_overlap_ratio": 0.20,
+            "target_area_ratio": 0.25,
+            "middle_layer_intrusion": True,
+            "occupies_primary_view": False,
+            "target_position": "right_side",
+            "narrow_side_view": True,
+            "core_area_split": True,
+            "scene_usable": False,
+            "obstruction_type": "pillar",
+            "evidence": "中央白色立柱分割画面，但右侧仍为完整业务工作区。",
+        })
+        self.assertFalse(result["middle_layer_intrusion"])
+        self.assertFalse(result["lens_obstructed"])
+        self.assertTrue(result["scene_usable"])
+
 
 class SemanticDecisionTests(unittest.TestCase):
     def setUp(self):
@@ -202,6 +335,331 @@ class SemanticDecisionTests(unittest.TestCase):
         )
         self.assertEqual(result["decision"], "review", result)
         self.assertEqual(result["module_results"]["element_match"]["status"], "warn")
+
+    def test_explicit_workspace_evidence_passes_when_elements_are_omitted(self):
+        result = fuse_semantic_decision(
+            cv_result(),
+            semantic(
+                visible_elements=[],
+                view_evidence="不锈钢操作台与水槽清晰可见",
+            ),
+            self.config,
+        )
+        self.assertEqual(result["decision"], "pass", result)
+        self.assertEqual(
+            result["module_results"]["element_match"]["status"],
+            "pass",
+        )
+        self.assertTrue(result["metrics"]["business_anchor_confirmed"])
+        self.assertIn("counter", result["metrics"]["anchor_evidence_ids"])
+        self.assertIn("sink", result["metrics"]["anchor_evidence_ids"])
+
+    def test_low_texture_warning_does_not_review_clear_cashier_view(self):
+        cv = cv_result(quality="warn", occlusion="skipped", blur="skipped")
+        cv["module_results"]["quality"] = {
+            "status": "warn",
+            "confidence": 0.62,
+            "reason": "画面低纹理，疑似对墙或天花板",
+        }
+        result = fuse_semantic_decision(
+            cv,
+            semantic(
+                camera_type="cashier",
+                view_evidence="收银台及操作界面清晰可见",
+                subject_coverage="medium",
+                operation_visibility="not_applicable",
+                visible_elements=[],
+            ),
+            self.config,
+        )
+        self.assertEqual(result["decision"], "pass", result)
+        self.assertEqual(result["reasons"], [])
+        self.assertTrue(result["metrics"]["business_anchor_confirmed"])
+
+    def test_low_texture_warning_still_reviews_unclear_view(self):
+        cv = cv_result(quality="warn", occlusion="skipped", blur="skipped")
+        cv["module_results"]["quality"] = {
+            "status": "warn",
+            "confidence": 0.62,
+            "reason": "画面低纹理，疑似对墙或天花板",
+        }
+        result = fuse_semantic_decision(
+            cv,
+            semantic(
+                target_area_visible=False,
+                view_valid=False,
+                view_issue="unknown",
+                primary_subject_central=False,
+                subject_coverage="none",
+                visible_elements=[],
+            ),
+            self.config,
+        )
+        self.assertEqual(result["decision"], "review", result)
+        self.assertTrue(any("低纹理" in reason for reason in result["reasons"]))
+
+    def test_storage_with_visible_contents_is_not_obstructed_by_boxes(self):
+        result = fuse_semantic_decision(
+            cv_result(occlusion="skipped", blur="skipped"),
+            semantic(
+                camera_type="storage",
+                target_area_visible=True,
+                view_valid=False,
+                view_issue="unknown",
+                primary_subject_central=False,
+                subject_coverage="small",
+                occlusion="partial",
+                occlusion_area_ratio=0.35,
+                occlusion_scope="none",
+                occlusion_affects_subject=False,
+                monitoring_subject_affected=False,
+                blur="none",
+                blur_scope="none",
+                view_evidence="堆叠纸箱与设备遮挡核心区域",
+                occlusion_evidence="纸箱堆叠部分遮挡操作区",
+                visible_elements=[],
+            ),
+            self.config,
+        )
+        self.assertEqual(result["decision"], "pass", result)
+        self.assertTrue(result["metrics"]["storage_layout_confirmed"])
+        self.assertEqual(result["metrics"]["vlm_view_valid"], True)
+        self.assertEqual(result["metrics"]["vlm_subject_coverage"], "medium")
+        self.assertEqual(result["metrics"]["vlm_occlusion"], "none")
+
+    def test_clear_static_anchors_override_contradictory_severe_blur(self):
+        cv = cv_result(quality="warn", occlusion="skipped", blur="skipped")
+        cv["module_results"]["quality"] = {
+            "status": "warn",
+            "confidence": 0.62,
+            "reason": "画面低纹理，疑似对墙或天花板",
+        }
+        result = fuse_semantic_decision(
+            cv,
+            semantic(
+                camera_type="cashier",
+                target_area_visible=True,
+                view_valid=False,
+                view_issue="blurred",
+                subject_coverage="medium",
+                occlusion="none",
+                blur="severe",
+                blur_scope="global",
+                monitoring_subject_affected=True,
+                operation_visibility="not_applicable",
+                view_evidence="收银台及屏幕清晰可见，有操作界面",
+                visible_elements=[
+                    {"id": "cash_register", "confidence": 0.95},
+                    {"id": "display_case", "confidence": 0.90},
+                    {"id": "counter", "confidence": 0.90},
+                ],
+            ),
+            self.config,
+        )
+        self.assertEqual(result["decision"], "pass", result)
+        self.assertTrue(result["metrics"]["contradictory_clear_anchor"])
+        self.assertEqual(result["metrics"]["vlm_blur"], "slight")
+
+    def test_dining_tables_with_nonimpacting_reflection_pass(self):
+        result = fuse_semantic_decision(
+            cv_result(occlusion="skipped", blur="skipped"),
+            semantic(
+                camera_type="dining",
+                target_area_visible=True,
+                view_valid=False,
+                view_issue="unknown",
+                subject_coverage="small",
+                occlusion="partial",
+                occlusion_area_ratio=0.35,
+                occlusion_scope="none",
+                occlusion_affects_subject=False,
+                monitoring_subject_affected=False,
+                blur="slight",
+                blur_scope="localized",
+                view_evidence="可见桌椅活动区，含顾客及地面铺装",
+                occlusion_evidence="左侧玻璃反射遮挡部分区域",
+                visible_elements=[],
+            ),
+            self.config,
+        )
+        self.assertEqual(result["decision"], "pass", result)
+        self.assertTrue(result["metrics"]["dining_layout_confirmed"])
+        self.assertEqual(result["metrics"]["vlm_view_valid"], True)
+        self.assertEqual(result["metrics"]["vlm_subject_coverage"], "medium")
+
+    def test_unknown_outdoor_view_with_positive_area_evidence_is_normalized(self):
+        result = fuse_semantic_decision(
+            cv_result(occlusion="skipped", blur="skipped"),
+            semantic(
+                camera_type="unknown",
+                is_store_outdoor=False,
+                target_area_visible=False,
+                view_valid=False,
+                view_issue="unrecognized",
+                primary_subject_central=False,
+                subject_coverage="none",
+                occlusion="none",
+                occlusion_affects_subject=False,
+                occlusion_scope="none",
+                monitoring_subject_affected=True,
+                blur="none",
+                blur_scope="none",
+                outdoor_view="proper",
+                view_evidence="可见人行道、黄线、摩托车、促销牌和店门",
+                business_scene_summary="店外人行道与停车区清晰可辨，无业务锚点冲突",
+                visible_elements=[],
+            ),
+            self.config,
+        )
+        self.assertEqual(result["decision"], "pass", result)
+        self.assertTrue(result["metrics"]["outdoor_anchor_confirmed"])
+        self.assertEqual(result["metrics"]["vlm_camera_type"], "store_outdoor")
+        self.assertTrue(result["metrics"]["vlm_target_area_visible"])
+
+    def test_explicit_no_anchor_evidence_is_not_treated_as_conflict_phrase(self):
+        result = fuse_semantic_decision(
+            cv_result(occlusion="skipped", blur="skipped"),
+            semantic(
+                camera_type="storage",
+                target_area_visible=True,
+                view_valid=False,
+                view_issue="unknown",
+                primary_subject_central=False,
+                subject_coverage="small",
+                view_evidence="画面为柜体内部，无业务锚点",
+                business_scene_summary="柜体内部，无业务锚点",
+                visible_elements=[],
+            ),
+            self.config,
+        )
+        self.assertEqual(result["decision"], "fail", result)
+        self.assertTrue(result["metrics"]["no_business_anchor_evidence"])
+
+    def test_uncertain_storage_without_layout_evidence_goes_to_review(self):
+        result = fuse_semantic_decision(
+            cv_result(occlusion="skipped", blur="skipped"),
+            semantic(
+                camera_type="storage",
+                target_area_visible=True,
+                view_valid=False,
+                view_issue="unknown",
+                primary_subject_central=False,
+                subject_coverage="small",
+                occlusion="partial",
+                occlusion_area_ratio=0.35,
+                occlusion_scope="none",
+                occlusion_affects_subject=False,
+                monitoring_subject_affected=False,
+                visible_elements=[],
+            ),
+            self.config,
+        )
+        self.assertEqual(result["decision"], "review", result)
+        self.assertFalse(result["metrics"]["storage_layout_confirmed"])
+
+    def test_explicit_no_anchor_evidence_fails_storage_override(self):
+        result = fuse_semantic_decision(
+            cv_result(occlusion="skipped", blur="skipped"),
+            semantic(
+                camera_type="storage",
+                target_area_visible=True,
+                view_valid=False,
+                view_issue="unknown",
+                primary_subject_central=False,
+                subject_coverage="small",
+                occlusion="none",
+                occlusion_affects_subject=False,
+                occlusion_scope="none",
+                monitoring_subject_affected=False,
+                blur="none",
+                blur_scope="none",
+                view_evidence="货架内有纸箱、杂物和包装物，无完整业务锚点",
+                business_scene_summary="货架内有杂物，无明确业务锚点或完整业务区",
+                visible_elements=[],
+            ),
+            self.config,
+        )
+        self.assertEqual(result["decision"], "fail", result)
+        self.assertTrue(result["metrics"]["no_business_anchor_evidence"])
+        self.assertFalse(result["metrics"]["storage_layout_confirmed"])
+        self.assertFalse(result["metrics"]["vlm_target_area_visible"])
+        self.assertEqual(result["metrics"]["vlm_subject_coverage"], "none")
+
+    def test_ceiling_fixture_without_work_surface_fails_wall_ceiling(self):
+        result = fuse_semantic_decision(
+            cv_result(),
+            semantic(
+                camera_type="kitchen",
+                target_area_visible=True,
+                view_valid=True,
+                view_issue="proper",
+                subject_coverage="medium",
+                view_evidence="完整排烟罩及下方操作区",
+                visible_elements=[
+                    {
+                        "id": "range_hood",
+                        "visible": True,
+                        "confidence": 0.95,
+                        "evidence": "排烟罩完整",
+                    },
+                    {
+                        "id": "counter",
+                        "visible": True,
+                        "confidence": 0.85,
+                        "evidence": "",
+                    },
+                ],
+            ),
+            self.config,
+        )
+        self.assertEqual(result["decision"], "fail", result)
+        self.assertTrue(result["metrics"]["ceiling_fixture_only_evidence"])
+        self.assertEqual(result["metrics"]["vlm_view_issue"], "wall_ceiling")
+        self.assertFalse(result["metrics"]["vlm_target_area_visible"])
+        self.assertEqual(result["metrics"]["vlm_subject_coverage"], "none")
+
+    def test_ceiling_fixture_with_explicit_work_surface_is_not_rejected(self):
+        result = fuse_semantic_decision(
+            cv_result(),
+            semantic(
+                camera_type="kitchen",
+                view_evidence="完整操作台与排烟罩可见",
+                visible_elements=[
+                    {
+                        "id": "counter",
+                        "visible": True,
+                        "confidence": 0.9,
+                        "evidence": "操作台完整",
+                    },
+                    {
+                        "id": "range_hood",
+                        "visible": True,
+                        "confidence": 0.9,
+                        "evidence": "排烟罩可见",
+                    },
+                ],
+            ),
+            self.config,
+        )
+        self.assertEqual(result["decision"], "pass", result)
+        self.assertFalse(result["metrics"]["ceiling_fixture_only_evidence"])
+
+    def test_explicit_anchor_does_not_override_global_blur(self):
+        result = fuse_semantic_decision(
+            cv_result(),
+            semantic(
+                view_evidence="收银台及操作界面可辨",
+                camera_type="cashier",
+                blur="severe",
+                blur_scope="global",
+                operation_visibility="not_applicable",
+                monitoring_subject_affected=True,
+                visible_elements=[],
+            ),
+            self.config,
+        )
+        self.assertEqual(result["decision"], "fail", result)
+        self.assertFalse(result["metrics"]["business_anchor_confirmed"])
 
     def test_slight_rotation_does_not_trigger_review(self):
         result = fuse_semantic_decision(
@@ -386,7 +844,7 @@ class SemanticDecisionTests(unittest.TestCase):
         )
         self.assertEqual(result["decision"], "pass", result)
 
-    def test_outdoor_severe_semantic_issue_is_cleared_by_passing_guard(self):
+    def test_outdoor_severe_semantic_issue_without_anchor_stays_failed(self):
         cv = cv_result(occlusion="skipped", blur="skipped")
         cv["module_results"]["quality_guard"] = {
             "available": True,
@@ -414,7 +872,8 @@ class SemanticDecisionTests(unittest.TestCase):
             ),
             self.config,
         )
-        self.assertEqual(result["decision"], "pass", result)
+        self.assertEqual(result["decision"], "fail", result)
+        self.assertTrue(any(reason.startswith("blur:") for reason in result["reasons"]))
 
     def test_outdoor_partial_occlusion_not_affecting_subject_passes(self):
         result = fuse_semantic_decision(
@@ -526,6 +985,40 @@ class SemanticDecisionTests(unittest.TestCase):
                 operation_visibility="not_applicable",
                 hand_action_visible=False,
                 monitoring_subject_affected=True,
+            ),
+            self.config,
+        )
+        self.assertEqual(result["decision"], "fail", result)
+        self.assertTrue(any(reason.startswith("blur:") for reason in result["reasons"]))
+
+    def test_unusable_severe_blur_cannot_be_cleared_by_sharp_background(self):
+        cv = cv_result(quality="pass", occlusion="skipped", blur="skipped")
+        cv["module_results"]["quality_guard"] = {
+            "available": True,
+            "occlusion": {"status": "pass", "ratio": 0.16},
+            "blur": {"status": "pass"},
+            "central": {
+                "occlusion": {"status": "pass", "ratio": 0.20},
+                "blur": {"status": "pass"},
+            },
+        }
+        result = fuse_semantic_decision(
+            cv,
+            semantic(
+                camera_type="dining",
+                target_area_visible=True,
+                view_valid=False,
+                view_issue="blurred",
+                primary_subject_central=False,
+                subject_coverage="small",
+                blur="severe",
+                blur_scope="global",
+                operation_visibility="not_applicable",
+                hand_action_visible=False,
+                monitoring_subject_affected=True,
+                view_evidence="近景容器遮挡操作区，画面严重虚焦",
+                blur_evidence="整体画面严重虚焦，核心区域不可辨",
+                visible_elements=[],
             ),
             self.config,
         )
@@ -697,7 +1190,7 @@ class SemanticDecisionTests(unittest.TestCase):
         )
         self.assertEqual(result["decision"], "fail", result)
 
-    def test_unknown_occlusion_without_target_directly_fails(self):
+    def test_unknown_occlusion_without_target_goes_to_review(self):
         result = fuse_semantic_decision(
             cv_result(occlusion="skipped", ratio=0.0),
             semantic(
@@ -712,7 +1205,7 @@ class SemanticDecisionTests(unittest.TestCase):
             ),
             self.config,
         )
-        self.assertEqual(result["decision"], "fail", result)
+        self.assertEqual(result["decision"], "review", result)
         self.assertTrue(any("目标区域可见" in reason for reason in result["reasons"]))
 
 
