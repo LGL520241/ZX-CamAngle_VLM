@@ -10,10 +10,12 @@ import numpy as np
 
 from .config import Config
 from .database import Database
+from .blur import analyze_blur
+from .occlusion import analyze_occlusion, save_occlusion_overlay
 
 
 def _read_image(path: Path):
-    img = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    img = cv2.imdecode(np.frombuffer(path.read_bytes(), dtype=np.uint8), cv2.IMREAD_COLOR)
     if img is None:
         raise ValueError(f"无法读取图片: {path}")
     return img
@@ -41,8 +43,6 @@ def _quality(gray: np.ndarray, t: Dict[str, float]) -> Dict[str, Any]:
         return {"status": "fail", "confidence": 0.99, "reason": "画面全黑或过暗", "metrics": metrics}
     if bright_ratio >= t["bright_ratio"] or mean > t["mean_bright"]:
         return {"status": "fail", "confidence": 0.99, "reason": "画面全白或过亮", "metrics": metrics}
-    if blur_var < t["blur_var"]:
-        return {"status": "fail", "confidence": 0.92, "reason": "画面模糊", "metrics": metrics}
     if std < t["std_low"] or edge_density < t["edge_density_low"]:
         return {
             "status": "warn",
@@ -204,6 +204,7 @@ def _sop(
 
 
 def _fusion(results: Dict[str, Dict[str, Any]], t: Dict[str, float]) -> Dict[str, Any]:
+    results = {name: result for name, result in results.items() if result["status"] != "skipped"}
     fails = [r for r in results.values() if r["status"] == "fail"]
     warns = [r for r in results.values() if r["status"] == "warn"]
     unknowns = [r for r in results.values() if r["status"] == "unknown"]
@@ -235,26 +236,64 @@ def _fusion(results: Dict[str, Dict[str, Any]], t: Dict[str, float]) -> Dict[str
 
 
 class AnalysisEngine:
-    """组合质量、旋转、基准图、SOP 四层判定的引擎。"""
+    """无需基准图的质量、黑灰遮挡、模糊、旋转与基础 SOP 检查。"""
 
     def __init__(self, config: Config, db: Database) -> None:
         self.config = config
         self.db = db
 
-    def analyze(self, image_path: Path, camera: Dict[str, Any]) -> Dict[str, Any]:
+    def analyze(
+        self,
+        image_path: Path,
+        camera: Dict[str, Any],
+        module_switches: Optional[Dict[str, bool]] = None,
+    ) -> Dict[str, Any]:
         img = _read_image(image_path)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        t = self.config.thresholds
+        # A settings update must not change thresholds halfway through a frame.
+        t = dict(self.config.thresholds)
+        switches = dict(module_switches or self.config.module_switches)
+        occlusion_enabled = bool(switches.get("occlusion", True))
+        blur_enabled = bool(switches.get("blur", True))
 
         quality = _quality(gray, t)
+        if occlusion_enabled:
+            occlusion, occlusion_mask = analyze_occlusion(img, t)
+            occlusion["overlay_available"] = save_occlusion_overlay(occlusion_mask, image_path)
+        else:
+            occlusion = {
+                "status": "skipped",
+                "confidence": 0.0,
+                "reason": "遮挡面积候选模块已关闭",
+                "metrics": {},
+                "regions": [],
+                "overlay_available": False,
+                "method": "disabled_by_module_switch",
+            }
+            occlusion_mask = np.zeros(gray.shape[:2], dtype=np.uint8)
+        if blur_enabled:
+            blur = analyze_blur(img, t, exclusion_mask=occlusion_mask)
+        else:
+            blur = {
+                "status": "skipped",
+                "confidence": 0.0,
+                "reason": "模糊程度模块已关闭",
+                "metrics": {},
+            }
         rotation = _rotation(gray, t)
         metrics = dict(quality["metrics"])
-
-        baseline_row = self.db.get_latest_baseline(camera["id"])
-        baseline_path = Path(baseline_row["path"]) if baseline_row else None
-        baseline, baseline_id = _baseline(img, baseline_path, t)
-        if baseline_row:
-            baseline_id = baseline_row["id"]
+        if occlusion_enabled:
+            metrics.update({
+                f"occlusion_{k}": v
+                for k, v in occlusion["metrics"].items()
+                if k != "occlusion_ratio"
+            })
+            metrics["occlusion_ratio"] = occlusion["metrics"]["occlusion_ratio"]
+        if blur_enabled:
+            metrics.update(blur["metrics"])
+        metrics["module_switches"] = switches
+        baseline_id = None
+        baseline = {"status": "skipped", "confidence": 0.0, "reason": "当前采用无基准图检测，暂不检查相对移位", "metrics": {}}
 
         template = camera.get("scene_template") or "default"
         sop_rules = self.config.sop_rules.get(template, self.config.sop_rules["default"])
@@ -262,6 +301,8 @@ class AnalysisEngine:
 
         module_results = {
             "quality": {k: quality[k] for k in ("status", "confidence", "reason")},
+            "occlusion": occlusion,
+            "blur": blur,
             "rotation": {k: rotation[k] for k in ("status", "confidence", "reason", "angle_deg")},
             "baseline": baseline,
             "sop": sop,

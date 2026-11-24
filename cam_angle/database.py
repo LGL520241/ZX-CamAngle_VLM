@@ -51,8 +51,20 @@ class Database:
                     FOREIGN KEY(camera_id) REFERENCES cameras(id)
                 );
 
+                CREATE TABLE IF NOT EXISTS inspection_batches (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT DEFAULT '',
+                    state TEXT DEFAULT 'running',
+                    total INTEGER DEFAULT 0,
+                    processed INTEGER DEFAULT 0,
+                    error TEXT DEFAULT '',
+                    created_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS captures (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    batch_id INTEGER,
                     camera_id INTEGER NOT NULL,
                     path TEXT DEFAULT '',
                     thumb_path TEXT DEFAULT '',
@@ -67,7 +79,8 @@ class Database:
                     module_results TEXT DEFAULT '{}',
                     baseline_id INTEGER,
                     created_at TEXT NOT NULL,
-                    FOREIGN KEY(camera_id) REFERENCES cameras(id)
+                    FOREIGN KEY(camera_id) REFERENCES cameras(id),
+                    FOREIGN KEY(batch_id) REFERENCES inspection_batches(id)
                 );
 
                 CREATE TABLE IF NOT EXISTS reviews (
@@ -91,6 +104,18 @@ class Database:
                     value TEXT NOT NULL
                 );
                 """
+            )
+            capture_columns = {
+                row["name"]
+                for row in self._conn.execute("PRAGMA table_info(captures)").fetchall()
+            }
+            if "batch_id" not in capture_columns:
+                self._conn.execute("ALTER TABLE captures ADD COLUMN batch_id INTEGER")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_captures_batch_id ON captures(batch_id, id DESC)"
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_captures_camera_batch ON captures(camera_id, batch_id, id DESC)"
             )
 
     # ---------- 通用 ----------
@@ -134,6 +159,85 @@ class Database:
         if row is None:
             return default
         return self._loads(row["value"], default)
+
+    # ---------- 抓帧批次 ----------
+    def create_batch(self, started_at: str) -> int:
+        now = _now()
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                """
+                INSERT INTO inspection_batches(started_at, state, created_at)
+                VALUES(?, 'running', ?)
+                """,
+                (started_at, now),
+            )
+            return int(cur.lastrowid)
+
+    def update_batch(
+        self,
+        batch_id: int,
+        *,
+        state: Optional[str] = None,
+        total: Optional[int] = None,
+        processed: Optional[int] = None,
+        finished_at: Optional[str] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        updates = []
+        params: list = []
+        for column, value in (
+            ("state", state),
+            ("total", total),
+            ("processed", processed),
+            ("finished_at", finished_at),
+            ("error", error),
+        ):
+            if value is not None:
+                updates.append(f"{column}=?")
+                params.append(value)
+        if not updates:
+            return
+        params.append(batch_id)
+        with self._lock, self._conn:
+            self._conn.execute(
+                f"UPDATE inspection_batches SET {', '.join(updates)} WHERE id=?",
+                params,
+            )
+
+    def get_batch(self, batch_id: int) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM inspection_batches WHERE id=?",
+                (batch_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_latest_batch(self) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM inspection_batches ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_batches(self, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT b.*,
+                       COUNT(c.id) AS capture_count,
+                       COALESCE(SUM(CASE WHEN c.decision='pass' THEN 1 ELSE 0 END), 0) AS pass_count,
+                       COALESCE(SUM(CASE WHEN c.decision='fail' THEN 1 ELSE 0 END), 0) AS fail_count,
+                       COALESCE(SUM(CASE WHEN c.decision='review' THEN 1 ELSE 0 END), 0) AS review_count,
+                       COALESCE(SUM(CASE WHEN c.decision='no_signal' THEN 1 ELSE 0 END), 0) AS no_signal_count
+                FROM inspection_batches b
+                LEFT JOIN captures c ON c.batch_id=b.id
+                GROUP BY b.id
+                ORDER BY b.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (limit, offset),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     # ---------- 相机 ----------
     def upsert_camera(
@@ -235,18 +339,20 @@ class Database:
         metrics: Optional[Dict[str, Any]] = None,
         module_results: Optional[Dict[str, Any]] = None,
         baseline_id: Optional[int] = None,
+        batch_id: Optional[int] = None,
     ) -> int:
         now = _now()
         with self._lock, self._conn:
             cur = self._conn.execute(
                 """
                 INSERT INTO captures(
-                    camera_id, path, thumb_path, source, quality, capture_time,
+                    batch_id, camera_id, path, thumb_path, source, quality, capture_time,
                     analyzed_at, decision, confidence, reasons, metrics, module_results,
                     baseline_id, created_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
+                    batch_id,
                     camera_id,
                     path,
                     thumb_path,
@@ -310,18 +416,22 @@ class Database:
         self,
         decision: Optional[str] = None,
         camera_id: Optional[int] = None,
+        batch_id: Optional[int] = None,
+        query: str = "",
         limit: int = 100,
         offset: int = 0,
     ) -> List[Dict[str, Any]]:
-        sql = "SELECT * FROM captures WHERE 1=1"
-        params: list = []
-        if decision:
-            sql += " AND decision=?"
-            params.append(decision)
-        if camera_id:
-            sql += " AND camera_id=?"
-            params.append(camera_id)
-        sql += " ORDER BY id DESC LIMIT ? OFFSET ?"
+        where, params = self._capture_filters(
+            decision=decision,
+            camera_id=camera_id,
+            batch_id=batch_id,
+            query=query,
+        )
+        sql = (
+            "SELECT c.* FROM captures c "
+            "LEFT JOIN cameras cam ON cam.id=c.camera_id "
+            f"WHERE {where} ORDER BY c.id DESC LIMIT ? OFFSET ?"
+        )
         params.extend([limit, offset])
         with self._lock:
             rows = self._conn.execute(sql, params).fetchall()
@@ -334,12 +444,54 @@ class Database:
             result.append(data)
         return result
 
-    def count_captures(self, decision: Optional[str] = None) -> int:
-        sql = "SELECT COUNT(*) AS c FROM captures"
-        params: tuple = ()
+    def _capture_filters(
+        self,
+        *,
+        decision: Optional[str] = None,
+        camera_id: Optional[int] = None,
+        batch_id: Optional[int] = None,
+        query: str = "",
+    ) -> tuple[str, list]:
+        clauses = ["1=1"]
+        params: list = []
         if decision:
-            sql += " WHERE decision=?"
-            params = (decision,)
+            clauses.append("c.decision=?")
+            params.append(decision)
+        if camera_id:
+            clauses.append("c.camera_id=?")
+            params.append(camera_id)
+        if batch_id is not None:
+            clauses.append("c.batch_id=?")
+            params.append(batch_id)
+        needle = query.strip()
+        if needle:
+            like = f"%{needle}%"
+            clauses.append(
+                "(cam.channel_name LIKE ? OR cam.device_serial LIKE ? "
+                "OR COALESCE(json_extract(cam.meta, '$.store_name'), '') LIKE ? "
+                "OR c.reasons LIKE ?)"
+            )
+            params.extend([like, like, like, like])
+        return " AND ".join(clauses), params
+
+    def count_captures(
+        self,
+        decision: Optional[str] = None,
+        camera_id: Optional[int] = None,
+        batch_id: Optional[int] = None,
+        query: str = "",
+    ) -> int:
+        where, params = self._capture_filters(
+            decision=decision,
+            camera_id=camera_id,
+            batch_id=batch_id,
+            query=query,
+        )
+        sql = (
+            "SELECT COUNT(*) AS c FROM captures c "
+            "LEFT JOIN cameras cam ON cam.id=c.camera_id "
+            f"WHERE {where}"
+        )
         with self._lock:
             row = self._conn.execute(sql, params).fetchone()
         return int(row["c"])
@@ -370,25 +522,35 @@ class Database:
             )
             return int(cur.lastrowid)
 
-    def stats(self) -> Dict[str, Any]:
+    def stats(self, batch_id: Optional[int] = None) -> Dict[str, Any]:
+        where = " WHERE batch_id=?" if batch_id is not None else ""
+        params: tuple = (batch_id,) if batch_id is not None else ()
         with self._lock:
-            total_cameras = int(self._conn.execute("SELECT COUNT(*) AS c FROM cameras").fetchone()["c"])
-            total_captures = int(self._conn.execute("SELECT COUNT(*) AS c FROM captures").fetchone()["c"])
+            total_cameras = int(
+                self._conn.execute(
+                    "SELECT COUNT(*) AS c FROM cameras WHERE status='active'"
+                ).fetchone()["c"]
+            )
+            total_captures = int(
+                self._conn.execute(
+                    f"SELECT COUNT(*) AS c FROM captures{where}",
+                    params,
+                ).fetchone()["c"]
+            )
             by_decision_rows = self._conn.execute(
-                "SELECT decision, COUNT(*) AS c FROM captures GROUP BY decision"
-            ).fetchall()
-            recent_rows = self._conn.execute(
-                "SELECT decision, COUNT(*) AS c FROM captures GROUP BY decision"
+                f"SELECT decision, COUNT(*) AS c FROM captures{where} GROUP BY decision",
+                params,
             ).fetchall()
             review_count = int(
-                self._conn.execute("SELECT COUNT(*) AS c FROM captures WHERE decision='review'").fetchone()["c"]
+                self._conn.execute(
+                    f"SELECT COUNT(*) AS c FROM captures{where + (' AND ' if where else ' WHERE ')}decision='review'",
+                    params,
+                ).fetchone()["c"]
             )
         by_decision = {r["decision"]: int(r["c"]) for r in by_decision_rows}
-        recent = {r["decision"]: int(r["c"]) for r in recent_rows}
         return {
             "total_cameras": total_cameras,
             "total_captures": total_captures,
             "review_count": review_count,
             "by_decision": by_decision,
-            "recent": recent,
         }

@@ -1,0 +1,18 @@
+[Unit]
+Description=CamAngle VLM camera inspection service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/xiaozheng/LGL/CamAngle/CamAngle_VLM
+ExecStart=/bin/bash /home/xiaozheng/LGL/CamAngle/CamAngle_VLM/deploy/start_app.sh
+Restart=always
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=20
+StandardOutput=append:/mnt/nas/logs/CamAngle_VLM/service/app.log
+StandardError=append:/mnt/nas/logs/CamAngle_VLM/service/app.log
+
+[Install]
+WantedBy=default.target

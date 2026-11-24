@@ -3,243 +3,747 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>CamAngle · AI Digital Twin Command Center</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=20261120c" />
+  <title>CamAngle · AI 巡检控制台</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/static/style.css?v=20261124d" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
-  <div class="scene-bg" aria-hidden="true">
-    <div class="grid-plane"></div>
-    <div class="aurora aurora-a"></div>
-    <div class="aurora aurora-b"></div>
-    <div class="scanline"></div>
-  </div>
-
-  <header class="topbar glass">
-    <div class="brand">
-      <span class="brand-mark"></span>
-      <div class="brand-text">
-        <strong>CamAngle</strong>
-        <span>AI Digital Twin Command Center</span>
-      </div>
-    </div>
-
-    <nav class="nav" aria-label="主导航">
-      <button data-page="dashboard" class="active">
-        <span class="nav-icon">◈</span>总览
-      </button>
-      <button data-page="cameras">
-        <span class="nav-icon">▦</span>相机矩阵
-      </button>
-      <button data-page="captures">
-        <span class="nav-icon">⌁</span>抓图流
-      </button>
-      <button data-page="review">
-        <span class="nav-icon">◎</span>人工复核 <span id="reviewBadge" class="badge">0</span>
-      </button>
-      <button data-page="settings">
-        <span class="nav-icon">⚙</span>控制台
-      </button>
-    </nav>
-
-    <div class="topbar-actions">
-      <div class="system-pulse"><span class="pulse-dot"></span><span id="sysState">系统在线</span></div>
-      <button id="startCycle" class="btn primary glow">▶ 开始一轮巡检</button>
-    </div>
-  </header>
-
-  <main>
-    <!-- 总览 -->
-    <section id="page-dashboard" class="page active">
-      <div class="page-head">
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark">C</span>
         <div>
-          <p class="eyebrow">REAL-TIME SITUATION AWARENESS</p>
-          <h1>摄像头角度态势总览</h1>
-        </div>
-        <div class="head-metrics">
-          <span class="hm"><i class="dot-ok"></i>巡检中 <b id="headCycleState">空闲</b></span>
-          <span class="hm"><i class="dot-warn"></i>待复核 <b id="headReview">0</b></span>
+          <strong>CamAngle</strong>
+          <small>AI 巡检控制台</small>
         </div>
       </div>
 
-      <div class="metric-grid">
-        <article class="metric glass">
-          <div class="metric-top"><span>摄像头总数</span><em>NODES</em></div>
-          <div class="metric-value mono" id="statCameras">-</div>
-          <div class="metric-foot"><span>已注册节点</span></div>
-        </article>
-        <article class="metric glass">
-          <div class="metric-top"><span>累计抓图</span><em>FRAMES</em></div>
-          <div class="metric-value mono" id="statCaptures">-</div>
-          <div class="metric-foot"><span>实时画面帧</span></div>
-        </article>
-        <article class="metric glass ok">
-          <div class="metric-top"><span>合格</span><em>PASS</em></div>
-          <div class="metric-value mono" id="statPass">-</div>
-          <div class="metric-foot"><span>正常视角</span></div>
-        </article>
-        <article class="metric glass bad">
-          <div class="metric-top"><span>不合格</span><em>FAIL</em></div>
-          <div class="metric-value mono" id="statFail">-</div>
-          <div class="metric-foot"><span>明显异常</span></div>
-        </article>
-        <article class="metric glass warn">
-          <div class="metric-top"><span>待复核</span><em>REVIEW</em></div>
-          <div class="metric-value mono" id="statReview">-</div>
-          <div class="metric-foot"><span>AI 不确定</span></div>
-        </article>
-        <article class="metric glass mute">
-          <div class="metric-top"><span>无信号</span><em>OFFLINE</em></div>
-          <div class="metric-value mono" id="statNoSignal">-</div>
-          <div class="metric-foot"><span>设备失联</span></div>
-        </article>
-      </div>
+      <nav class="side-nav" aria-label="主导航">
+        <p class="nav-label">工作台</p>
+        <button data-page="dashboard" class="active"><span>◫</span>巡检总览</button>
+        <button data-page="cameras"><span>▦</span>相机节点</button>
+        <button data-page="captures"><span>▤</span>抓图记录</button>
+        <button data-page="review"><span>◎</span>人工复核 <b id="reviewBadge" class="badge">0</b></button>
+        <p class="nav-label">系统</p>
+        <button data-page="settings"><span>⚙</span>运行设置</button>
+      </nav>
 
-      <div class="dashboard-grid">
-        <section class="panel glass">
-          <div class="panel-head">
-            <h2>AI 判定分布</h2>
-            <span class="panel-tag">LIVE</span>
+      <div class="sidebar-footer">
+        <div class="system-state">
+          <span class="status-dot"></span>
+          <div>
+            <b id="sysState">系统在线</b>
+            <small>广东大区 · 实时同步</small>
           </div>
-          <div class="chart-wrap"><canvas id="decisionChart"></canvas></div>
+        </div>
+        <small class="version">CamAngle Console · v0.2</small>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <div class="batch-bar">
+        <div class="batch-picker">
+          <span class="batch-icon" aria-hidden="true">▦</span>
+          <div class="batch-select-wrap">
+            <small>查看抓帧批次</small>
+            <button
+              id="batchSelectButton"
+              class="batch-select-trigger"
+              type="button"
+              aria-haspopup="listbox"
+              aria-expanded="false"
+              aria-controls="batchSelectMenu"
+              title="查看全部历史时间段"
+            >
+              <span id="batchSelectedLabel" class="batch-selected-label">正在加载批次…</span>
+              <span id="batchSelectState" class="batch-scope-badge">当前</span>
+              <span id="batchSelectHint" class="batch-select-hint">查看全部时间段</span>
+              <span class="batch-select-chevron" aria-hidden="true"></span>
+            </button>
+            <div id="batchSelectMenu" class="batch-select-menu" hidden>
+              <div class="batch-menu-head">
+                <div>
+                  <b>历史巡检批次</b>
+                  <span>按时间倒序，选择后查看当时的检测状态</span>
+                </div>
+                <span id="batchMenuCount" class="batch-menu-count"></span>
+              </div>
+              <div id="batchSelectOptions" class="batch-select-options" role="listbox" aria-label="选择抓帧批次"></div>
+              <div class="batch-menu-foot">切换后，总览、抓图记录和人工复核都会同步显示该时间段的数据。</div>
+            </div>
+          </div>
+        </div>
+        <button
+          id="batchViewAll"
+          class="batch-view-all"
+          type="button"
+          aria-haspopup="listbox"
+          aria-expanded="false"
+          aria-controls="batchSelectMenu"
+        >
+          查看全部时间段 <b id="batchViewAllCount">0</b>
+        </button>
+        <span id="batchSummary" class="batch-summary">暂无批次</span>
+        <button id="refreshBatches" class="btn" type="button">刷新批次</button>
+      </div>
+
+      <!-- 总览 -->
+      <section id="page-dashboard" class="page active">
+        <header class="page-head dashboard-head">
+          <div>
+            <p class="eyebrow">OPERATIONS OVERVIEW</p>
+            <h1>巡检总览</h1>
+            <p class="subtitle">实时掌握摄像头角度、抓图任务与 AI 判定状态。</p>
+          </div>
+          <div class="dashboard-actions">
+            <div class="head-status">
+              <span class="chip"><i class="dot ok"></i><span id="headCycleState">空闲</span></span>
+              <span class="chip"><i class="dot warn"></i>待复核 <b id="headReview">0</b></span>
+            </div>
+            <button id="startCycle" class="btn primary start-cycle" type="button">
+              <span class="start-cycle-icon" aria-hidden="true">▶</span>
+              <span class="start-cycle-copy">
+                <strong>抓取最新画面</strong>
+                <small>重新调用设备抓帧</small>
+              </span>
+            </button>
+          </div>
+        </header>
+
+        <div class="summary-strip" aria-label="巡检指标快捷入口">
+          <button class="stat-card link-card" type="button" data-goto-page="cameras" aria-label="查看全部相机节点">
+            <span>摄像头总数</span>
+            <strong id="statCameras">-</strong>
+            <small>已接入节点</small>
+            <i aria-hidden="true">→</i>
+          </button>
+          <button class="stat-card link-card" type="button" data-goto-page="captures" aria-label="查看全部抓图记录">
+            <span>累计抓图</span>
+            <strong id="statCaptures">-</strong>
+            <small>本环境样本</small>
+            <i aria-hidden="true">→</i>
+          </button>
+          <button class="stat-card link-card ok" type="button" data-goto-page="captures" data-decision="pass" aria-label="查看合格抓图">
+            <span>合格</span>
+            <strong id="statPass">-</strong>
+            <small>画面检查通过</small>
+            <i aria-hidden="true">→</i>
+          </button>
+          <button class="stat-card link-card bad" type="button" data-goto-page="captures" data-decision="fail" aria-label="查看不合格抓图">
+            <span>不合格</span>
+            <strong id="statFail">-</strong>
+            <small>明显异常</small>
+            <i aria-hidden="true">→</i>
+          </button>
+          <button class="stat-card link-card warn" type="button" data-goto-page="review" aria-label="查看待复核队列">
+            <span>待复核</span>
+            <strong id="statReview">-</strong>
+            <small>AI 不确定</small>
+            <i aria-hidden="true">→</i>
+          </button>
+          <button class="stat-card link-card mute" type="button" data-goto-page="captures" data-decision="no_signal" aria-label="查看无信号抓图">
+            <span>无信号</span>
+            <strong id="statNoSignal">-</strong>
+            <small>设备失联</small>
+            <i aria-hidden="true">→</i>
+          </button>
+        </div>
+
+        <div class="main-grid">
+          <section class="panel mission-panel">
+            <div class="panel-head">
+              <div>
+                <h2>巡检任务引擎</h2>
+                <p>实时抓图、解析与入库进度</p>
+              </div>
+              <span class="tag" id="cycleStateTag">IDLE</span>
+            </div>
+
+            <div id="cycleBox" class="cycle-box">
+              <div class="cycle-main">
+                <div>
+                  <span class="cycle-label">总体进度</span>
+                  <strong id="cyclePercent">0.0%</strong>
+                </div>
+                <div class="cycle-count">
+                  <b id="cycleProgress">- / -</b>
+                  <span id="cycleState">空闲</span>
+                </div>
+              </div>
+              <div class="progress-track"><div id="cycleBar" class="progress-bar"></div></div>
+              <div class="cycle-meta">
+                <span>速度 <b id="cycleRate">-</b></span>
+                <span>预计剩余 <b id="cycleEta">-</b></span>
+                <span>开始 <b id="cycleStarted">-</b></span>
+                <span>结束 <b id="cycleFinished">-</b></span>
+              </div>
+            </div>
+
+            <div class="capture-flow">
+              <div class="flow-caption">
+                <span>本轮实时抓帧链路</span>
+                <small id="flowStateText">等待开始</small>
+              </div>
+              <div class="flow-steps" id="captureFlow" aria-label="抓帧处理流程">
+                <div class="flow-step" data-flow-step="抓图">
+                  <span class="flow-dot">1</span>
+                  <div><b>设备抓图</b><small>获取当前画面</small></div>
+                </div>
+                <div class="flow-step" data-flow-step="下载">
+                  <span class="flow-dot">2</span>
+                  <div><b>下载新帧</b><small>生成本轮图片</small></div>
+                </div>
+                <div class="flow-step" data-flow-step="分析">
+                  <span class="flow-dot">3</span>
+                  <div><b>AI 分析</b><small>遮挡与清晰度</small></div>
+                </div>
+                <div class="flow-step" data-flow-step="入库">
+                  <span class="flow-dot">4</span>
+                  <div><b>写入记录</b><small>展示最新结果</small></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="active-head">
+              <h3>节点处理明细</h3>
+              <span>实时显示当前步骤</span>
+            </div>
+            <div id="activeTasks" class="active-tasks">暂无进行中的任务</div>
+          </section>
+
+          <section class="panel chart-panel">
+            <div class="panel-head">
+              <div>
+                <h2>AI 判定分布</h2>
+                <p>当前环境累计结果</p>
+              </div>
+            </div>
+            <div class="chart-wrap"><canvas id="decisionChart"></canvas></div>
+          </section>
+        </div>
+
+        <section class="panel recent-panel">
+          <div class="panel-head recent-head">
+            <div>
+              <h2>最新抓帧</h2>
+              <p>每轮巡检都会重新调用设备抓图；新画面写入后这里会自动更新。</p>
+            </div>
+            <div class="recent-actions">
+              <span class="live-label"><i></i>实时更新</span>
+              <button id="viewAllCaptures" class="btn" type="button">全部记录</button>
+            </div>
+          </div>
+          <div id="recentList" class="recent-grid"></div>
         </section>
-
-        <section class="panel glass">
-          <div class="panel-head">
-            <h2>巡检任务引擎</h2>
-            <span class="panel-tag" id="cycleStateTag">IDLE</span>
-          </div>
-          <div id="cycleBox" class="cycle-box">
-            <div class="cycle-big">
-              <strong class="mono" id="cyclePercent">0.0%</strong>
-              <span id="cycleState">空闲</span>
-            </div>
-            <div class="progress-track"><div id="cycleBar" class="progress-bar"></div></div>
-            <div class="cycle-stats">
-              <div><span>进度</span><b class="mono" id="cycleProgress">- / -</b></div>
-              <div><span>速度</span><b class="mono" id="cycleRate">-</b></div>
-              <div><span>预计剩余</span><b class="mono" id="cycleEta">-</b></div>
-            </div>
-            <div class="cycle-times">
-              <span>开始 <b class="mono" id="cycleStarted">-</b></span>
-              <span>结束 <b class="mono" id="cycleFinished">-</b></span>
-            </div>
-          </div>
-        </section>
-      </div>
-
-      <section class="panel glass">
-        <div class="panel-head">
-          <h2>实时处理任务</h2>
-          <span class="panel-tag">TRACKING</span>
-        </div>
-        <div id="activeTasks" class="active-tasks">暂无进行中的任务</div>
       </section>
 
-      <section class="panel glass">
-        <div class="panel-head">
-          <h2>最近抓图</h2>
-          <span class="panel-tag">FEED</span>
-        </div>
-        <div id="recentList" class="strip"></div>
-      </section>
-    </section>
-
-    <!-- 相机矩阵 -->
-    <section id="page-cameras" class="page">
-      <div class="page-head">
-        <div>
-          <p class="eyebrow">CAMERA MATRIX</p>
-          <h1>相机矩阵</h1>
-        </div>
-        <span class="head-metrics"><i class="dot-ok"></i><b id="cameraCountLabel">-</b> 个在线节点</span>
-      </div>
-      <div class="panel glass">
-        <div class="panel-head">
-          <h2>节点列表</h2>
-          <span class="panel-tag">GUANGDONG</span>
-        </div>
-        <div id="cameraGrid" class="camera-grid"></div>
-      </div>
-    </section>
-
-    <!-- 抓图流 -->
-    <section id="page-captures" class="page">
-      <div class="page-head">
-        <div>
-          <p class="eyebrow">CAPTURE STREAM</p>
-          <h1>抓图记录</h1>
-        </div>
-        <div class="filters">
-          <select id="captureFilter">
-            <option value="">全部判定</option>
+      <!-- 相机 -->
+      <section id="page-cameras" class="page">
+        <header class="page-head">
+          <div>
+            <p class="eyebrow">CAMERA NODES</p>
+            <h1>相机节点</h1>
+            <p class="subtitle">快速定位设备、通道与最近一次 AI 判定。</p>
+          </div>
+          <div class="head-status"><span class="chip"><i class="dot ok"></i>活跃节点 <b id="cameraCountLabel">-</b></span></div>
+        </header>
+        <div class="page-toolbar">
+          <label class="search-control">
+            <span aria-hidden="true">⌕</span>
+            <input id="cameraSearch" type="search" placeholder="搜索相机、门店、序列号" autocomplete="off" />
+          </label>
+          <select id="cameraStatusFilter" aria-label="按最近判定筛选节点">
+            <option value="">全部状态</option>
+            <option value="pending">待处理</option>
             <option value="pass">合格</option>
             <option value="fail">不合格</option>
             <option value="review">待复核</option>
             <option value="no_signal">无信号</option>
           </select>
+          <div class="view-switch" data-view-for="cameras" aria-label="相机节点视图">
+            <button type="button" data-view="grid" class="active" aria-pressed="true" title="卡片视图">▦ 卡片</button>
+            <button type="button" data-view="list" aria-pressed="false" title="紧凑列表视图">☷ 列表</button>
+            <button type="button" data-view="dense" aria-pressed="false" title="超紧凑视图">≡ 超紧凑</button>
+          </div>
+          <span id="cameraFilterSummary" class="toolbar-summary"></span>
+        </div>
+        <div id="cameraGrid" class="node-grid"></div>
+        <div id="cameraPagination" class="pagination" aria-label="相机节点分页"></div>
+      </section>
+
+      <!-- 抓图 -->
+      <section id="page-captures" class="page">
+        <header class="page-head">
+          <div>
+            <p class="eyebrow">CAPTURE STREAM</p>
+            <h1>抓图记录</h1>
+            <p class="subtitle">从最新画面中快速定位异常、待复核与设备离线记录。</p>
+          </div>
+          <div class="capture-controls">
+            <label class="search-control compact">
+              <span aria-hidden="true">⌕</span>
+              <input id="captureSearch" type="search" placeholder="搜索相机或门店" autocomplete="off" />
+            </label>
+            <select id="captureFilter" aria-label="按判定筛选抓图">
+              <option value="">全部判定</option>
+              <option value="pass">合格</option>
+              <option value="fail">不合格</option>
+              <option value="review">待复核</option>
+              <option value="no_signal">无信号</option>
+            </select>
+            <div class="view-switch" data-view-for="captures" aria-label="抓图记录视图">
+              <button type="button" data-view="grid" class="active" aria-pressed="true" title="画廊视图">▦ 画廊</button>
+              <button type="button" data-view="list" aria-pressed="false" title="紧凑列表视图">☷ 列表</button>
+              <button type="button" data-view="dense" aria-pressed="false" title="超紧凑视图">≡ 超紧凑</button>
+            </div>
+          </div>
+        </header>
+        <div class="results-bar">
           <span id="captureSummary" class="capture-summary"></span>
         </div>
-      </div>
-      <div id="captureGrid" class="capture-grid"></div>
-    </section>
+        <div id="captureGrid" class="capture-grid"></div>
+        <div id="capturePagination" class="pagination" aria-label="抓图记录分页"></div>
+      </section>
 
-    <!-- 人工复核 -->
-    <section id="page-review" class="page">
-      <div class="page-head">
-        <div>
-          <p class="eyebrow">HUMAN-IN-THE-LOOP</p>
-          <h1>人工复核队列</h1>
+      <!-- 复核 -->
+      <section id="page-review" class="page">
+        <header class="page-head">
+          <div>
+            <p class="eyebrow">HUMAN REVIEW</p>
+            <h1>人工复核</h1>
+            <p class="subtitle">聚焦 AI 不确定画面，快速比对并提交人工结论。</p>
+          </div>
+          <div class="head-status"><span class="chip"><i class="dot warn"></i>待处理 <b id="reviewQueueCount">0</b></span></div>
+        </header>
+        <div class="review-toolbar">
+          <label class="search-control compact">
+            <span aria-hidden="true">⌕</span>
+            <input id="reviewSearch" type="search" placeholder="搜索相机、门店或异常原因" autocomplete="off" />
+          </label>
+          <div class="view-switch" data-view-for="review" aria-label="人工复核视图">
+            <button type="button" data-view="grid" class="active" aria-pressed="true" title="详情卡片视图">▦ 详情</button>
+            <button type="button" data-view="list" aria-pressed="false" title="紧凑列表视图">☷ 列表</button>
+            <button type="button" data-view="dense" aria-pressed="false" title="超紧凑视图">≡ 超紧凑</button>
+          </div>
+          <span id="reviewFilterSummary" class="toolbar-summary"></span>
         </div>
-        <span class="head-metrics"><i class="dot-warn"></i>AI 不确定项</span>
-      </div>
-      <div id="reviewList" class="review-list"></div>
-    </section>
+        <div id="reviewList" class="review-list"></div>
+        <div id="reviewPagination" class="pagination" aria-label="人工复核分页"></div>
+      </section>
 
-    <!-- 控制台 -->
-    <section id="page-settings" class="page">
-      <div class="page-head">
-        <div>
-          <p class="eyebrow">CONTROL CONSOLE</p>
-          <h1>运行设置</h1>
-        </div>
-      </div>
-      <div class="panel glass">
-        <div class="form-grid">
-          <label>演示模式 <input id="settingDemo" type="text" disabled /></label>
-          <label>并发数 <input id="settingConcurrency" type="text" disabled /></label>
-          <label>抓图间隔(秒) <input id="settingInterval" type="text" disabled /></label>
-          <label>复核置信度阈值 <input id="settingConfidence" type="number" step="0.01" /></label>
-          <label>倾斜失败阈值(度) <input id="settingRollFail" type="number" step="0.5" /></label>
-          <label>基准旋转阈值(度) <input id="settingBaseRot" type="number" step="0.5" /></label>
-        </div>
-        <div class="actions">
-          <button id="saveSettings" class="btn primary">保存设置</button>
-          <button id="seedDemo" class="btn">重置演示数据</button>
-        </div>
-      </div>
-    </section>
-  </main>
+      <!-- 设置 -->
+      <section id="page-settings" class="page settings-page">
+        <header class="page-head settings-page-head">
+          <div>
+            <p class="eyebrow">SYSTEM SETTINGS</p>
+            <h1>运行设置</h1>
+            <p class="subtitle">集中管理巡检策略、检测阈值和 Qwen 提示词。修改将在后续巡检中生效。</p>
+          </div>
+          <div class="settings-head-actions">
+            <span id="settingsDirtyState" class="settings-dirty-state">
+              <i></i><span>读取配置中</span>
+            </span>
+            <button id="saveSettingsTop" class="btn primary settings-save-button" type="button" data-save-settings>
+              保存全部修改
+            </button>
+          </div>
+        </header>
 
-  <div id="detailModal" class="modal hidden">
-    <div class="modal-content glass-strong">
-      <span class="close" data-close="detailModal">&times;</span>
-      <div class="modal-head">
-        <p class="eyebrow">INSPECTION DETAIL</p>
-        <h2>抓图判定详情</h2>
+        <div class="settings-overview" aria-label="当前运行配置概览">
+          <div class="settings-overview-card">
+            <span>运行环境</span>
+            <strong id="settingDemo">-</strong>
+            <small>由服务器部署固定</small>
+          </div>
+          <div class="settings-overview-card accent">
+            <span>检测链路</span>
+            <strong id="settingModuleSummary">-</strong>
+            <small>当前生效流水线</small>
+          </div>
+          <div class="settings-overview-card">
+            <span>有效并发</span>
+            <strong id="settingConcurrencySummary">-</strong>
+            <small>当前链路并行任务</small>
+          </div>
+          <div class="settings-overview-card">
+            <span>抓图间隔</span>
+            <strong id="settingIntervalSummary">-</strong>
+            <small>同一通道最小间隔</small>
+          </div>
+          <div class="settings-overview-card">
+            <span>巡检范围</span>
+            <strong id="settingSampleSummary">-</strong>
+            <small>随机抽样 / 全量</small>
+          </div>
+        </div>
+
+        <div class="settings-layout">
+          <nav class="settings-toc" aria-label="设置分区">
+            <span class="settings-toc-label">配置分区</span>
+            <button type="button" data-settings-target="settings-runtime" class="active" aria-controls="settings-runtime" aria-expanded="true">
+              <i>01</i><span>运行策略</span>
+            </button>
+            <button type="button" data-settings-target="settings-thresholds" aria-controls="settings-thresholds" aria-expanded="false">
+              <i>02</i><span>检测阈值</span>
+            </button>
+            <button type="button" data-settings-target="settings-prompts" aria-controls="settings-prompts" aria-expanded="false">
+              <i>03</i><span>Qwen Prompt</span>
+            </button>
+            <button type="button" data-settings-target="settings-maintenance" aria-controls="settings-maintenance" aria-expanded="false">
+              <i>04</i><span>维护操作</span>
+            </button>
+            <div class="settings-toc-note">点击分区展开对应配置；保存时仍会统一写入全部设置。</div>
+          </nav>
+
+          <div class="settings-content">
+            <section id="settings-runtime" class="panel settings-block settings-anchor">
+              <div class="settings-block-head">
+                <div class="settings-block-index">01</div>
+                <div>
+                  <h2>运行策略</h2>
+                  <p>选择参与本轮巡检的检测模块，并设置任务并发、抓图节奏和通用判定阈值。</p>
+                </div>
+                <span class="settings-block-tag">NEXT CYCLE</span>
+              </div>
+
+              <div class="settings-subhead">
+                <h3>检测链路</h3>
+                <span>两条链路互斥，保存后从下一轮巡检开始使用</span>
+              </div>
+              <div class="pipeline-mode-grid">
+                <label class="pipeline-mode-card">
+                  <input id="settingPipelineQwenOnly" type="radio" name="settingPipelineMode" value="coupled" />
+                  <span class="pipeline-mode-index">A</span>
+                  <span class="pipeline-mode-copy">
+                    <strong>抓图 + 推理串联</strong>
+                    <small>当前模式：每路抓图后立即执行 Qwen 推理，完成后再处理下一路任务。</small>
+                  </span>
+                  <span id="settingPipelineCoupledState" class="pipeline-mode-state">可选</span>
+                </label>
+                <label class="pipeline-mode-card">
+                  <input id="settingPipelineDecoupled" type="radio" name="settingPipelineMode" value="decoupled" />
+                  <span class="pipeline-mode-index">B</span>
+                  <span class="pipeline-mode-copy">
+                    <strong>先抓图，再批量推理</strong>
+                    <small>第一阶段抓取全部图片，第二阶段统一执行 Qwen 推理，可独立设置两阶段并发。</small>
+                  </span>
+                  <span id="settingPipelineDecoupledState" class="pipeline-mode-state">可选</span>
+                </label>
+              </div>
+              <div id="settingPipelineImpact" class="pipeline-impact" aria-live="polite">
+                <div class="pipeline-impact-step">
+                  <small>阶段 1</small>
+                  <strong id="pipelineStageOne">抓图 + Qwen 推理</strong>
+                  <span id="pipelineStageOneMeta">4 路并行</span>
+                </div>
+                <i class="pipeline-impact-arrow" aria-hidden="true">→</i>
+                <div class="pipeline-impact-step">
+                  <small>阶段 2</small>
+                  <strong id="pipelineStageTwo">完成入库</strong>
+                  <span id="pipelineStageTwoMeta">每路完成后再处理下一路</span>
+                </div>
+                <p id="settingPipelineImpactNote">串联模式实现简单，同时占用抓图和推理资源。</p>
+              </div>
+              <p id="settingQwenAvailability" class="module-switch-note"></p>
+
+              <div class="settings-subhead">
+                <h3>链路参数</h3>
+                <span>仅显示当前链路真正使用的并发配置</span>
+              </div>
+              <div id="settingCoupledParams" class="pipeline-param-panel active">
+                <div class="pipeline-param-head">
+                  <div><strong>串联链路参数</strong><small>抓图、下载和 Qwen 推理在同一任务链路内完成。</small></div>
+                  <span>当前使用</span>
+                </div>
+                <div class="settings-fields settings-fields-2">
+                  <label class="setting-field">
+                    <span>串联链路并发数</span>
+                    <div class="setting-input-with-unit">
+                      <input id="settingConcurrency" type="number" min="1" max="24" step="1" required />
+                      <i>路</i>
+                    </div>
+                    <small>同时执行“抓图 + 推理”的摄像头数量。</small>
+                  </label>
+                </div>
+              </div>
+              <div id="settingDecoupledParams" class="pipeline-param-panel decoupled" hidden>
+                <div class="pipeline-param-head">
+                  <div><strong>解耦链路参数</strong><small>先完成全部抓图，再集中执行 Qwen 推理。</small></div>
+                  <span>当前使用</span>
+                </div>
+                <div class="settings-fields settings-fields-2">
+                  <label class="setting-field">
+                    <span>抓图并发</span>
+                    <div class="setting-input-with-unit">
+                      <input id="settingCaptureConcurrency" type="number" min="1" max="24" step="1" required />
+                      <i>路</i>
+                    </div>
+                    <small>第一阶段同时抓取和下载的摄像头数量。</small>
+                  </label>
+                  <label class="setting-field">
+                    <span>Qwen 推理并发</span>
+                    <div class="setting-input-with-unit">
+                      <input id="settingInferenceConcurrency" type="number" min="1" max="24" step="1" required />
+                      <i>张</i>
+                    </div>
+                    <small>第二阶段同时送入 Qwen 的图片数量。</small>
+                  </label>
+                </div>
+              </div>
+
+              <div class="settings-subhead settings-subhead-common">
+                <h3>通用运行参数</h3>
+                <span>两条链路共用，保存后用于后续抓图与判定</span>
+              </div>
+              <div class="settings-fields settings-fields-runtime">
+                <div class="setting-readonly">
+                  <span>演示模式</span>
+                  <strong id="settingEnvironmentDetail">-</strong>
+                  <small>由服务器部署环境固定，避免生产批次混入演示数据。</small>
+                </div>
+                <label class="setting-field">
+                  <span>抓图间隔</span>
+                  <div class="setting-input-with-unit">
+                    <input id="settingInterval" type="number" min="5" max="300" step="1" required />
+                    <i>秒</i>
+                  </div>
+                  <small>同一通道建议至少 5 秒，避免触发设备侧抓图限流。</small>
+                </label>
+                <label class="setting-field">
+                  <span>每轮巡检数量</span>
+                  <div class="setting-input-with-unit">
+                    <input id="settingSampleSize" type="number" min="0" max="100000" step="1" required />
+                    <i>张</i>
+                  </div>
+                  <small>填 0 跑全部摄像头，填正整数则每轮随机抽取对应数量。</small>
+                </label>
+                <label class="setting-field">
+                  <span>复核置信度阈值</span>
+                  <div class="setting-input-with-unit">
+                    <input id="settingConfidence" type="number" min="0" max="1" step="0.01" required />
+                    <i>0–1</i>
+                  </div>
+                  <small>数值越高，越多低置信度结果会进入人工复核。</small>
+                </label>
+                <label class="setting-field">
+                  <span>倾斜失败阈值</span>
+                  <div class="setting-input-with-unit">
+                    <input id="settingRollFail" type="number" min="0.1" max="90" step="0.1" required />
+                    <i>度</i>
+                  </div>
+                  <small>超过该角度时直接判定画面倾斜不合格。</small>
+                </label>
+              </div>
+            </section>
+
+            <section id="settings-thresholds" class="settings-anchor" hidden>
+              <div class="settings-block-head settings-block-head-outside">
+                <div class="settings-block-index">02</div>
+                <div>
+                  <h2>检测阈值</h2>
+                  <p>阈值可以预先调整；即使模块当前关闭，保存后也会保留，重新开启即可生效。</p>
+                </div>
+              </div>
+
+              <div class="threshold-grid">
+                <section class="panel settings-threshold-card">
+                  <div class="threshold-card-head">
+                    <div>
+                      <span class="threshold-kicker">OPENCV / OCCLUSION</span>
+                      <h3>黑色 / 灰色遮挡</h3>
+                    </div>
+                    <div class="threshold-card-actions">
+                      <button class="threshold-reset" type="button" data-threshold-preset="occlusion">推荐值</button>
+                      <span id="occlusionSettingsNote" class="setting-status-pill">已开启</span>
+                    </div>
+                  </div>
+                  <p class="threshold-description">按黑灰连续低纹理区域计算面积，严格超过阈值判不合格，接近阈值转人工复核。</p>
+                  <div id="occlusionSettings" class="settings-fields settings-fields-2">
+                    <label class="setting-field">
+                      <span>遮挡面积阈值</span>
+                      <div class="setting-input-with-unit"><input id="settingOcclusionArea" type="number" min="1" max="100" step="0.1" required /><i>%</i></div>
+                      <small>按整幅有效画面面积计算。</small>
+                    </label>
+                    <label class="setting-field">
+                      <span>黑色亮度上限</span>
+                      <div class="setting-input-with-unit"><input id="settingOcclusionDark" type="number" min="0" max="254" step="1" required /><i>0–254</i></div>
+                      <small>数值越高，黑色候选范围越大。</small>
+                    </label>
+                    <label class="setting-field">
+                      <span>灰色饱和度上限</span>
+                      <div class="setting-input-with-unit"><input id="settingOcclusionGray" type="number" min="0" max="255" step="1" required /><i>0–255</i></div>
+                      <small>数值越高，灰色候选范围越大。</small>
+                    </label>
+                    <label class="setting-field">
+                      <span>低纹理标准差上限</span>
+                      <div class="setting-input-with-unit"><input id="settingOcclusionTexture" type="number" min="0" max="128" step="0.1" required /><i>STD</i></div>
+                      <small>数值越高，更多平坦区域进入候选。</small>
+                    </label>
+                  </div>
+                </section>
+
+                <section class="panel settings-threshold-card">
+                  <div class="threshold-card-head">
+                    <div>
+                      <span class="threshold-kicker">OPENCV / CLARITY</span>
+                      <h3>分区模糊检测</h3>
+                    </div>
+                    <div class="threshold-card-actions">
+                      <button class="threshold-reset" type="button" data-threshold-preset="blur">推荐值</button>
+                      <span id="blurSettingsNote" class="setting-status-pill">已开启</span>
+                    </div>
+                  </div>
+                  <p class="threshold-description">分区检查主体清晰度，排除时间水印和噪声干扰；局部模糊或纹理证据不足时转人工复核。</p>
+                  <div id="blurSettings" class="settings-fields settings-fields-2">
+                    <label class="setting-field">
+                      <span>清晰度分数下限</span>
+                      <div class="setting-input-with-unit"><input id="settingBlurScore" type="number" min="0.01" max="1000000" step="0.01" required /><i>SCORE</i></div>
+                      <small>数值越高，模糊判定越严格。</small>
+                    </label>
+                    <label class="setting-field">
+                      <span>低清晰度分区比例</span>
+                      <div class="setting-input-with-unit"><input id="settingBlurRatio" type="number" min="1" max="100" step="0.1" required /><i>%</i></div>
+                      <small>按有足够结构的有效分区计算。</small>
+                    </label>
+                  </div>
+                </section>
+              </div>
+            </section>
+
+            <section id="settings-prompts" class="panel settings-block settings-anchor" hidden>
+              <div class="settings-block-head">
+                <div class="settings-block-index">03</div>
+                <div>
+                  <h2>Qwen Prompt</h2>
+                  <p>系统规则定义判断原则，任务 Prompt 定义场景分类和输出结构。保存后从下一轮巡检开始生效。</p>
+                </div>
+                <span class="settings-block-tag">ADVANCED</span>
+              </div>
+
+              <div class="prompt-workbench">
+                <div id="promptTabs" class="prompt-tabs" role="tablist" aria-label="Prompt 类型">
+                  <button type="button" class="active" data-prompt-tab="system" role="tab" aria-selected="true">
+                    <span>系统规则</span><small>判断边界与安全约束</small>
+                  </button>
+                  <button type="button" data-prompt-tab="user" role="tab" aria-selected="false">
+                    <span>任务 / 输出</span><small>分类枚举与 JSON 字段</small>
+                  </button>
+                </div>
+                <div class="prompt-panes">
+                  <label class="prompt-pane active" data-prompt-pane="system">
+                    <span class="prompt-pane-label">SYSTEM PROMPT</span>
+                    <textarea id="settingPromptSystem" rows="16" spellcheck="false" required></textarea>
+                    <span class="prompt-pane-foot"><small>定义模型始终遵守的判断原则。</small><b id="systemPromptCount">0 字符</b></span>
+                  </label>
+                  <label class="prompt-pane" data-prompt-pane="user">
+                    <span class="prompt-pane-label">USER / OUTPUT PROMPT</span>
+                    <textarea id="settingPromptUser" rows="16" spellcheck="false" required></textarea>
+                    <span class="prompt-pane-foot"><small>定义场景枚举、证据要求和输出 JSON。</small><b id="userPromptCount">0 字符</b></span>
+                  </label>
+                </div>
+              </div>
+            </section>
+
+            <section id="settings-maintenance" class="panel settings-block settings-anchor settings-maintenance" hidden>
+              <div class="settings-block-head">
+                <div class="settings-block-index">04</div>
+                <div>
+                  <h2>维护操作</h2>
+                  <p>演示数据重置会覆盖当前演示环境，仅用于本地验证和功能演示。</p>
+                </div>
+              </div>
+              <div class="maintenance-row">
+                <div>
+                  <strong>演示数据维护</strong>
+                  <span id="seedDemoAvailability">仅演示模式可用；当前生产环境不会执行该操作。</span>
+                </div>
+                <button id="seedDemo" class="btn danger-outline" type="button">重置演示数据</button>
+              </div>
+            </section>
+          </div>
+        </div>
+
+        <div class="settings-save-bar">
+          <div>
+            <strong id="settingsSaveTitle">配置已同步</strong>
+            <span id="settingsSaveSubtitle">修改运行参数或 Prompt 后，在这里统一保存。</span>
+          </div>
+          <div class="settings-save-actions">
+            <button id="resetSettingsChanges" class="btn" type="button">恢复修改前</button>
+            <button id="saveSettings" class="btn primary settings-save-button" type="button" data-save-settings>
+              保存全部修改
+            </button>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="detailModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="detailModalTitle">
+    <div class="modal-content">
+      <div class="modal-head detail-modal-head">
+        <div class="detail-modal-title">
+          <p class="eyebrow">INSPECTION DETAIL</p>
+          <h2 id="detailModalTitle">抓图判定详情</h2>
+        </div>
+        <div class="detail-case-nav" aria-label="抓图记录切换">
+          <button id="detailPrev" class="btn detail-nav-button previous" type="button" aria-label="查看上一条抓图记录">
+            <span class="detail-nav-arrow" aria-hidden="true">←</span>
+            <span>上一条抓图</span>
+          </button>
+          <span id="detailNavPosition" class="detail-nav-position">1 / 1</span>
+          <button id="detailNext" class="btn detail-nav-button next" type="button" aria-label="查看下一条抓图记录">
+            <span>下一条抓图</span>
+            <span class="detail-nav-arrow" aria-hidden="true">→</span>
+          </button>
+        </div>
+        <button class="modal-close" type="button" data-close="detailModal" aria-label="关闭详情">&times;</button>
       </div>
+      <p id="detailNavHint" class="detail-nav-hint">可在当前筛选结果中连续查看，键盘 ← → 也可以切换。</p>
       <div class="compare">
-        <figure><figcaption>当前抓图</figcaption><img id="detailImage" alt="当前抓图" /></figure>
+        <figure>
+          <figcaption>当前抓图</figcaption>
+          <div class="capture-image-stage">
+            <img id="detailImage" alt="当前抓图" />
+            <img id="detailOcclusionMask" class="occlusion-overlay" alt="疑似遮挡区域标注" hidden />
+          </div>
+          <label id="detailOcclusionToggleWrap" class="occlusion-toggle" hidden><input id="detailOcclusionToggle" type="checkbox" checked />显示疑似遮挡区域<span>红色为算法标注区域</span></label>
+          <p id="detailOcclusionMaskError" class="occlusion-note" hidden>遮挡标注暂时无法加载，请结合原图和检测指标复核。</p>
+        </figure>
         <figure><figcaption>基准图</figcaption><img id="detailBaseline" alt="基准图" /></figure>
       </div>
       <div id="detailInfo" class="detail-info"></div>
     </div>
   </div>
 
+  <div id="storeModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="storeModalTitle">
+    <div class="modal-content store-modal-content">
+      <div class="modal-head store-modal-head">
+        <div>
+          <p class="eyebrow">STORE INSPECTION SUMMARY</p>
+          <h2 id="storeModalTitle">门店巡检汇总</h2>
+          <p id="storeModalMeta" class="store-modal-meta"></p>
+        </div>
+        <button class="modal-close" type="button" data-close="storeModal" aria-label="关闭门店汇总">&times;</button>
+      </div>
+      <div id="storeSummary" class="store-summary-grid"></div>
+      <div class="store-modal-toolbar">
+        <div id="storeFilters" class="view-switch store-filters" role="group" aria-label="按判定筛选门店通道">
+          <button type="button" class="active" data-store-filter="" aria-pressed="true">全部</button>
+          <button type="button" data-store-filter="pass" aria-pressed="false">合格</button>
+          <button type="button" data-store-filter="fail" aria-pressed="false">不合格</button>
+          <button type="button" data-store-filter="review" aria-pressed="false">待复核</button>
+          <button type="button" data-store-filter="no_signal" aria-pressed="false">无信号</button>
+          <button type="button" data-store-filter="pending" aria-pressed="false">待处理</button>
+        </div>
+        <span id="storeFilterSummary" class="toolbar-summary"></span>
+      </div>
+      <div id="storeCameraList" class="store-camera-list"></div>
+    </div>
+  </div>
+
   <div id="toast" class="toast hidden"></div>
-  <script src="/static/app.js?v=20261120c"></script>
+  <script src="/static/app.js?v=20261124d"></script>
 </body>
 </html>

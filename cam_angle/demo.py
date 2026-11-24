@@ -108,6 +108,8 @@ def seed_demo(db: Database, config: Config) -> Dict[str, Any]:
 
     created_cameras = 0
     created_captures = 0
+    batch_started_at = _now()
+    batch_id = db.create_batch(batch_started_at)
     for idx, spec in enumerate(specs, start=1):
         store_id, template = stores[spec["store"]]
         device_serial = f"DEMO{1000 + idx}"
@@ -152,6 +154,7 @@ def seed_demo(db: Database, config: Config) -> Dict[str, Any]:
             metrics=result["metrics"],
             module_results=result["module_results"],
             baseline_id=baseline_id,
+            batch_id=batch_id,
         )
         db.update_capture_result(
             capture_id,
@@ -164,7 +167,19 @@ def seed_demo(db: Database, config: Config) -> Dict[str, Any]:
         )
         created_captures += 1
 
-    return {"seeded": True, "cameras": created_cameras, "captures": created_captures}
+    db.update_batch(
+        batch_id,
+        state="finished",
+        total=created_captures,
+        processed=created_captures,
+        finished_at=_now(),
+    )
+    return {
+        "seeded": True,
+        "batch_id": batch_id,
+        "cameras": created_cameras,
+        "captures": created_captures,
+    }
 
 
 def render_demo_image(kind: str) -> np.ndarray:

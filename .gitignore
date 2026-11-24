@@ -26,6 +26,7 @@ dist/
 # 抓图原图、缩略图、基准图、SQLite 数据库、数据备份均为本地运行产物，大文件不入库
 data/
 data_backup_*/
+data_archive_*/
 *.db
 *.sqlite
 *.sqlite3
