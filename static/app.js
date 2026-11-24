@@ -1206,8 +1206,13 @@ function renderStoreCameraList() {
     const last = camera.last_capture;
     const title = camera.channel_name || camera.device_serial || `相机 ${camera.id}`;
     const confidence = last && Number.isFinite(last.confidence) ? last.confidence.toFixed(2) : "-";
+    const captureId = last?.id;
     return `
-      <article class="store-camera-row" data-state="${escapeHtml(decision)}">
+      <article
+        class="store-camera-row${captureId ? " is-openable" : ""}"
+        data-state="${escapeHtml(decision)}"
+        ${captureId ? `data-open="${captureId}" role="button" tabindex="0" aria-label="查看 ${escapeHtml(title)} 的抓图详情"` : ""}
+      >
         <span class="store-camera-icon">CH</span>
         <div class="store-camera-copy">
           <strong>${escapeHtml(title)}</strong>
@@ -1671,6 +1676,17 @@ document.addEventListener("DOMContentLoaded", async () => {
       item.setAttribute("aria-pressed", String(active));
     });
     renderStoreCameraList();
+  });
+  document.getElementById("storeCameraList").addEventListener("click", (event) => {
+    const row = event.target.closest(".store-camera-row[data-open]");
+    if (row) openDetail(Number(row.dataset.open), visibleCaseIds("storeCameraList"));
+  });
+  document.getElementById("storeCameraList").addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    const row = event.target.closest(".store-camera-row[data-open]");
+    if (!row) return;
+    event.preventDefault();
+    openDetail(Number(row.dataset.open), visibleCaseIds("storeCameraList"));
   });
   document.getElementById("captureSearch").addEventListener("input", () => {
     debounceSearch("captures", () => loadCaptures(1));

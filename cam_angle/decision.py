@@ -298,8 +298,18 @@ def fuse_semantic_decision(
     elif not target_area_verified:
         reviews.append("semantic: Qwen 未确认拍摄到目标业务区域")
         semantic_status = "warn"
-    elif element["score"] >= review_score and vlm_conf >= 0.55:
-        semantic_status = "pass"
+    elif element["score"] >= review_score:
+        # confidence=0 常见于截断修复后缺失的 confidence 字段，
+        # 不能把它当成模型明确给出的低置信度。
+        if vlm_conf <= 0.0 or vlm_conf >= 0.55:
+            semantic_status = "pass"
+        else:
+            reviews.append(
+                f"element_match: 业务元素命中率 {element['score']:.0%}，"
+                f"已达到 {review_score:.0%} 阈值；但模型置信度仅 {vlm_conf:.0%}，"
+                "低于 55%，需人工复核"
+            )
+            semantic_status = "warn"
     else:
         reviews.append(
             f"element_match: 业务元素命中率仅 {element['score']:.0%}，"

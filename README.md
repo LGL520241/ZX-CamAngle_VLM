@@ -51,7 +51,7 @@ cd /home/xiaozheng/LGL/CamAngle/CamAngle_VLM
 ./deploy/install_user_service.sh
 ```
 
-默认 Qwen 输入最长边为 1280，`max-model-len=8192`、`max-num-seqs=24`，vLLM 显存利用率配置为 0.95。8192 上下文用于容纳较长巡检 Prompt、图片 token 和完整 JSON 输出，避免多元素结果在对象中途被截断。
+默认 Qwen 输入最长边为 1280，`max-model-len=8192`、`max-num-seqs=24`，vLLM 显存利用率配置为 0.95。8192 上下文用于容纳较长巡检 Prompt、图片 token 和完整 JSON 输出，避免多元素结果在对象中途被截断。VLM 请求默认超时为 180 秒，生产环境建议推理并发不超过 8。
 `install_user_service.sh` 会注册用户级 `camangle-vlm-app.service`，支持异常自动重启和开机自启；服务日志写入 `/mnt/nas/logs/CamAngle_VLM/service/app.log`。
 
 完整的场景枚举、元素权重、融合阈值和异常处理规则见 [算法设计](docs/algorithm.md)。

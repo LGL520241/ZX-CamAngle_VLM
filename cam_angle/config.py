@@ -69,7 +69,7 @@ class Config:
         default_factory=lambda: os.getenv("VLM_MODEL", "Qwen3-VL-4B-Instruct-AWQ-4bit")
     )
     vlm_api_key: str = field(default_factory=lambda: os.getenv("VLM_API_KEY", "EMPTY"))
-    vlm_timeout: float = field(default_factory=lambda: float(os.getenv("VLM_TIMEOUT", "90")))
+    vlm_timeout: float = field(default_factory=lambda: float(os.getenv("VLM_TIMEOUT", "180")))
     vlm_max_image_side: int = field(
         default_factory=lambda: int(os.getenv("VLM_MAX_IMAGE_SIDE", "1280"))
     )

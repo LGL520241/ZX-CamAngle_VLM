@@ -13,8 +13,8 @@ import httpx
 import numpy as np
 
 from .config import Config
-from .prompts import SYSTEM_PROMPT as DEFAULT_SYSTEM_PROMPT
-from .prompts import USER_PROMPT as DEFAULT_USER_PROMPT
+from .prompts_compact import SYSTEM_PROMPT as DEFAULT_SYSTEM_PROMPT
+from .prompts_compact import USER_PROMPT as DEFAULT_USER_PROMPT
 
 
 CANONICAL_ELEMENTS: Dict[str, Dict[str, Any]] = {
@@ -25,19 +25,20 @@ CANONICAL_ELEMENTS: Dict[str, Dict[str, Any]] = {
     "refrigerator": {"label": "冰箱/冷柜", "weight": 0.18},
     "display_case": {"label": "展示柜/保温柜/保酥柜", "weight": 0.12},
     "sink": {"label": "水池/清洗槽", "weight": 0.18},
-    "prep_area": {"label": "裹粉/切配/备餐区", "weight": 0.12},
+    "prep_area": {"label": "切配/备餐/腌制区", "weight": 0.12},
+    "breading_area": {"label": "裹粉区/裹粉台", "weight": 0.12},
     "employee": {"label": "员工", "weight": 0.10},
 }
 
 EXPECTED_ELEMENTS: Dict[str, List[str]] = {
     "kitchen": [
         "oil_fryer", "range_hood", "counter", "refrigerator",
-        "display_case", "sink", "prep_area",
+        "display_case", "sink", "prep_area", "breading_area",
     ],
     "cashier": ["cash_register", "counter", "display_case", "employee"],
     "kitchen_cashier": [
         "oil_fryer", "cash_register", "range_hood", "counter",
-        "refrigerator", "display_case", "sink", "prep_area",
+        "refrigerator", "display_case", "sink", "prep_area", "breading_area",
     ],
     "dining": ["counter", "employee"],
     "storage": ["counter"],
@@ -145,7 +146,7 @@ outdoor_view 只能是 proper、facing_sky、facing_wall、unknown。
 angle_quality 只能是 good、slightly_off、bad、unknown。轻微倾斜不影响合格。
 
 visible_elements 只从以下 id 选择，并且只在有明确视觉证据时返回：
-oil_fryer（油锅/炸锅）、cash_register（收银机/收银屏）、range_hood（油烟机/排烟罩）、counter（柜台/操作台/备餐台/打包台/前台木质台面）、refrigerator（冰箱/冷柜/冷藏柜/冷冻柜）、display_case（展示柜/保温柜/保酥柜/酥脆柜）、sink（水池/清洗槽）、prep_area（裹粉台/切配台/备餐区/腌制备餐区）、employee（员工）。
+oil_fryer（油锅/炸锅）、cash_register（收银机/收银屏）、range_hood（油烟机/排烟罩）、counter（柜台/操作台/备餐台/打包台/前台木质台面）、refrigerator（冰箱/冷柜/冷藏柜/冷冻柜）、display_case（展示柜/保温柜/保酥柜/酥脆柜）、sink（水池/清洗槽）、prep_area（切配台/备餐区/腌制备餐区）、breading_area（裹粉区/裹粉台）、employee（员工）。
 visible_elements 只返回 visible=true 的元素，不可见元素直接省略。每个元素给出 0 到 1 的 confidence 和不超过 40 字的 evidence。元素必须真实可见，不能根据餐饮常识补全。
 
 输出必须是一个 JSON 对象，并完整包含系统响应结构要求的全部字段。不要复制任何固定的正向模板；所有布尔值、枚举、面积比例和 evidence 必须由当前图片重新判断。business_scene_summary 必须与 view_valid、target_area_visible、occlusion、blur 和 monitoring_subject_affected 一致。"""
@@ -183,12 +184,12 @@ RESPONSE_SCHEMA: Dict[str, Any] = {
             "type": "string",
             "enum": ["none", "small", "medium", "large"],
         },
-        "view_evidence": {"type": "string"},
+        "view_evidence": {"type": "string", "maxLength": 120},
         "occlusion": {
             "type": "string",
             "enum": ["none", "partial", "severe", "unknown"],
         },
-        "occlusion_evidence": {"type": "string"},
+        "occlusion_evidence": {"type": "string", "maxLength": 120},
         "occlusion_area_ratio": {"type": "number", "minimum": 0, "maximum": 1},
         "occlusion_affects_subject": {"type": "boolean"},
         "occlusion_scope": {
@@ -199,7 +200,7 @@ RESPONSE_SCHEMA: Dict[str, Any] = {
             "type": "string",
             "enum": ["none", "slight", "severe", "unknown"],
         },
-        "blur_evidence": {"type": "string"},
+        "blur_evidence": {"type": "string", "maxLength": 120},
         "blur_scope": {
             "type": "string",
             "enum": ["none", "localized", "global", "unknown"],
@@ -218,9 +219,10 @@ RESPONSE_SCHEMA: Dict[str, Any] = {
             "type": "string",
             "enum": ["good", "slightly_off", "bad", "unknown"],
         },
-        "angle_evidence": {"type": "string"},
+        "angle_evidence": {"type": "string", "maxLength": 120},
         "visible_elements": {
             "type": "array",
+            "maxItems": 3,
             "items": {
                 "type": "object",
                 "additionalProperties": False,
@@ -231,12 +233,12 @@ RESPONSE_SCHEMA: Dict[str, Any] = {
                     },
                     "visible": {"type": "boolean"},
                     "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-                    "evidence": {"type": "string"},
+                    "evidence": {"type": "string", "maxLength": 60},
                 },
                 "required": ["id", "visible", "confidence", "evidence"],
             },
         },
-        "business_scene_summary": {"type": "string"},
+        "business_scene_summary": {"type": "string", "maxLength": 180},
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
     },
     "required": [
@@ -281,11 +283,20 @@ OBSTRUCTION_VERIFY_PROMPT = """只做镜头空间可用性复核。
 只有中间层实际遮住核心设备、人员手部动作或完整工位，导致业务活动无法继续监控时，才判 scene_usable=false。面积较大但核心活动仍可辨认时，scene_usable=true。
 专用摄像头可以只监控一个工位，不要求目标位于中央或占画面三分之一。只要完整工位清楚可监控，occupies_primary_view=true、narrow_side_view=false，即使目标位于左侧或右侧。
 墙面、卷帘门、柜体、设备外壳和固定场景边界不属于中间层。目标位于左侧、右侧、侧中部或占比不足三分之一，都不能单独构成 narrow_side_view 或 scene_usable=false；只有独立物体实际挡住完整工位或核心操作时才可失败。
-但专用工位必须包含可用工作平面、设备正面/操作界面、货架通道、交易区或实际作业区域。只看到设备顶部、背面、外壳、布线、墙面、天花板或空地面时，按无业务锚点处理，scene_usable=false，不能因为出现一台设备就判合格。
-设备碎片、局部柜台、二维码/宣传贴纸、菜单板、墙角和空地面不能作为业务锚点。至少要有一个完整可用的操作面、完整工作台面、完整交易面、可通行通道或人员实际作业区域，否则 scene_usable=false。
-仓库/储物区必须看到可访问货架正面、存取区域或通行通道。近距离纸箱、货物堆或包装面占满画面且没有可利用的储物作业区域时，scene_usable=false。
+但固定结构只有在业务工位仍可正常监控时才算正常场景。墙面、招牌板、柜体侧面或近距离表面占据画面大部分、业务区只剩边缘小角时，表示镜头朝向错误或视线被切断，应判 scene_usable=false。
+天花板、吊顶、灯具和空调出风口不是业务锚点。它们占据画面上半部主体、业务区只在底部露出一部分时，应判 scene_usable=false。
+镜头自身外壳、防护罩、支架、机器盖板或与业务无关的邻近设备外壳不属于正常场景边界；它们占据较大画幅并把业务区挤到一侧时，应判 scene_usable=false。
+雨棚、遮阳伞、帆布、篷布等表面即使属于正常设施，只要紧贴镜头并占据画面主体，只在边缘露出少量目标区域，也应判 scene_usable=false。
+密集网格、笼架、护栏或筛网形成大面积连续前景屏障时，即使能部分透视，只要把业务区挤到一侧或明显削弱核心区域可读性，也应判 scene_usable=false。单根细线或少量稀疏线条才可作为局部干扰。
+如果近镜头物体从上方和下方同时侵入画面，只剩中间一条窄窗口能看到业务区，即使设备局部可见，也属于多面前景夹击，应判 scene_usable=false。
+近镜头立柱、门框或招牌形成连续纵向屏障，把业务区切成窄条时，也应判 scene_usable=false。
+后厨、收银等作业场景必须包含可用工作平面、设备正面/操作界面、交易区或实际作业区域。只看到设备顶部、背面、外壳、布线、墙面、天花板或空地面时，按无业务锚点处理，scene_usable=false。
+设备碎片、局部柜台、二维码/宣传贴纸、菜单板、墙角和空地面不能作为后厨/收银业务锚点。至少要有一个完整可用的操作面、完整工作台面、完整交易面或人员实际作业区域，否则 scene_usable=false。
+设备内部机械、电机、接线、维护舱、电气控制腔和设备顶盖不属于业务界面，不能命中设备元素，也不能据此判 scene_usable=true。
+人员必须与明确业务界面或作业区域一起出现。只有人员身体/脚步、地面和设备侧边外壳时，scene_usable=false；employee 本身不能作为有效覆盖的唯一证据。
+仓库/储物区例外：纸箱、货架、货物和储物设备是正常内容。只要能大致看清仓库内部全貌和设施分布，scene_usable=true；局部遮挡导致全貌不确定时按不确定转人工；只有近镜头物体大面积盖住画面、无法看清整体布局时 scene_usable=false。
 门口和店外场景不要求正对门洞或门头，也不要求当前有人流。能看到入口交界、人行道、店外桌椅、街道、停车区或其他目标外部区域，即可判 scene_usable=true；outdoor_view=unknown 不单独触发失败。
-员工和顾客本身是监控业务主体，不是中层遮挡物。人物头部、肩部、身体或手臂靠近镜头，只要关键设备或当前工作动作仍可辨认，不得据此判 narrow_side_view 或 scene_usable=false。
+员工和顾客通常是监控业务主体，不是中层遮挡物；但如果人员形成横跨画面的大面积模糊前景带，遮住操作台、核心动作或主要业务区域，应按严重遮挡处理，scene_usable=false。
 吊顶附近的线缆、管道、吊扇、灯具和支架横穿画面上方时，如果操作台、人员手部和核心作业面仍然清楚，不计入中层遮挡，也不能按线缆外接范围估计遮挡比例。
 如果画面中至少一名员工的手部、手臂和具体工作动作清楚可见，且业务工作区仍能识别，前景网罩、边框、立柱或局部结构不能单独构成 narrow_side_view 或 scene_usable=false；只有核心业务活动确实无法观察时才判不可用。
 物体名称、颜色和材质不影响判断。只有独立中间层实际盖住核心操作、把完整工位切成碎片，或业务目标本身不可识别时，scene_usable=false；否则 scene_usable=true。目标居中程度、画面占比、目标偏侧和固定结构面积均不能单独决定失败。
@@ -544,6 +555,51 @@ def parse_json_content(content: str) -> Dict[str, Any]:
             value = json.loads(text[start:end + 1])
         except json.JSONDecodeError as exc:
             raise VLMError(f"Qwen JSON 解析失败: {exc}") from exc
+    if not isinstance(value, dict):
+        raise VLMError("Qwen 返回结果不是 JSON 对象")
+    return value
+
+
+def repair_truncated_json(content: str) -> Dict[str, Any]:
+    """Close a JSON object truncated by the model's output-token limit."""
+    text = _strip_fence(content)
+    start = text.find("{")
+    if start < 0:
+        raise VLMError("Qwen 返回内容中没有 JSON 对象")
+    text = text[start:]
+    stack: List[str] = []
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "[{":
+            stack.append(char)
+        elif char in "]}":
+            if stack:
+                stack.pop()
+    repaired = text.rstrip()
+    if in_string:
+        repaired += '"'
+    repaired = repaired.rstrip()
+    if repaired.endswith(":"):
+        repaired += "0"
+    while repaired.endswith(","):
+        repaired = repaired[:-1].rstrip()
+    for opener in reversed(stack):
+        repaired += "}" if opener == "{" else "]"
+    try:
+        value = json.loads(repaired)
+    except json.JSONDecodeError as exc:
+        raise VLMError(f"Qwen JSON 无法修复: {exc}") from exc
     if not isinstance(value, dict):
         raise VLMError("Qwen 返回结果不是 JSON 对象")
     return value
@@ -808,6 +864,7 @@ class QwenSemanticClient:
         content = ""
         usage: Dict[str, Any] = {}
         finish_reason = ""
+        json_repaired = False
         try:
             image_bytes, image_meta = await asyncio.to_thread(
                 prepare_image,
@@ -854,9 +911,10 @@ class QwenSemanticClient:
                 ],
                 # 输出包含场景、遮挡、模糊、操作可见性和元素证据。
                 # 多元素画面需要更充足的空间，避免 JSON 在对象中途截断。
-                "max_tokens": 1600,
+                "max_tokens": 1200,
                 "temperature": 0.0,
                 "top_p": 1.0,
+                "frequency_penalty": 0.3,
                 "seed": 20261123,
                 "response_format": {
                     "type": "json_schema",
@@ -878,12 +936,56 @@ class QwenSemanticClient:
                     request_body["response_format"] = {"type": "json_object"}
                     response = await client.post(endpoint, json=request_body, headers=headers)
                 response.raise_for_status()
-            payload = response.json()
-            choice = payload["choices"][0]
-            content = choice["message"]["content"]
-            finish_reason = str(choice.get("finish_reason") or "")
-            usage = payload.get("usage") or {}
-            raw = parse_json_content(content)
+                payload = response.json()
+                choice = payload["choices"][0]
+                content = choice["message"]["content"]
+                finish_reason = str(choice.get("finish_reason") or "")
+                usage = payload.get("usage") or {}
+                try:
+                    raw = parse_json_content(content)
+                except VLMError:
+                    retry_prompt = (
+                        prompt
+                        + "\n\n【紧凑重试】只输出完整 JSON。"
+                        "evidence 每条最多 30 个汉字，禁止重复词语、重复元素或列举清单；"
+                        "visible_elements 最多 4 个。不要输出任何 JSON 之外的文字。"
+                    )
+                    retry_body = dict(request_body)
+                    retry_body["messages"] = [
+                        {"role": "system", "content": system_prompt},
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": retry_prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": "data:image/jpeg;base64,"
+                                        + base64.b64encode(image_bytes).decode("ascii")
+                                    },
+                                },
+                            ],
+                        },
+                    ]
+                    retry_body["max_tokens"] = 1200
+                    retry_body["frequency_penalty"] = 0.7
+                    retry_body["seed"] = 20261124
+                    response = await client.post(
+                        endpoint, json=retry_body, headers=headers
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                    choice = payload["choices"][0]
+                    content = choice["message"]["content"]
+                    finish_reason = str(choice.get("finish_reason") or "")
+                    usage = payload.get("usage") or {}
+                    try:
+                        raw = parse_json_content(content)
+                    except VLMError:
+                        if finish_reason != "length":
+                            raise
+                        raw = repair_truncated_json(content)
+                        json_repaired = True
             semantic = normalize_semantic(raw)
             obstruction_verification = None
             main_occlusion_evidence = semantic["occlusion_evidence"]
@@ -906,6 +1008,7 @@ class QwenSemanticClient:
                     "range_hood",
                     "sink",
                     "prep_area",
+                    "breading_area",
                     "refrigerator",
                     "display_case",
                 }
@@ -1048,6 +1151,7 @@ class QwenSemanticClient:
                     "vlm_prompt_tokens": usage.get("prompt_tokens"),
                     "vlm_completion_tokens": usage.get("completion_tokens"),
                     "vlm_finish_reason": finish_reason,
+                    "vlm_json_repaired": json_repaired,
                     "vlm_input": image_meta,
                     "vlm_foreground_focus_suspicion": focus_metrics,
                 },

@@ -1443,6 +1443,7 @@ h1 { margin: 0; font-size: 25px; font-weight: 650; letter-spacing: -.2px; }
   padding: 20px;
   background: rgba(3,6,12,.78);
 }
+#detailModal { z-index: 120; }
 .modal.hidden, .toast.hidden { display: none; }
 .modal-content {
   width: min(980px, 96vw);
@@ -1617,6 +1618,19 @@ h1 { margin: 0; font-size: 25px; font-weight: 650; letter-spacing: -.2px; }
 .store-camera-row[data-state="fail"] { box-shadow: inset 2px 0 0 rgba(251,113,133,.78); }
 .store-camera-row[data-state="review"] { box-shadow: inset 2px 0 0 rgba(245,181,68,.78); }
 .store-camera-row[data-state="no_signal"] { box-shadow: inset 2px 0 0 rgba(148,163,184,.55); }
+.store-camera-row.is-openable {
+  cursor: pointer;
+  transition: border-color .16s ease, background .16s ease, transform .16s ease;
+}
+.store-camera-row.is-openable:hover {
+  border-color: rgba(91,140,255,.32);
+  background: rgba(91,140,255,.065);
+  transform: translateX(2px);
+}
+.store-camera-row.is-openable:focus-visible {
+  outline: 2px solid rgba(91,140,255,.72);
+  outline-offset: 1px;
+}
 .store-camera-icon {
   width: 30px;
   height: 30px;

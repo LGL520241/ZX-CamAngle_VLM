@@ -16,6 +16,7 @@ from cam_angle.vlm import (
     RESPONSE_SCHEMA,
     normalize_semantic,
     parse_json_content,
+    repair_truncated_json,
     score_elements,
 )
 
@@ -114,11 +115,34 @@ class SemanticNormalizationTests(unittest.TestCase):
         self.assertEqual(score_elements(result)["hit_count"], 1)
         self.assertNotIn("invented_object", {item["id"] for item in result["visible_elements"]})
 
+    def test_repairs_json_truncated_inside_evidence(self):
+        result = repair_truncated_json(
+            '{"camera_type":"kitchen","view_valid":true,'
+            '"visible_elements":[{"id":"counter","visible":true,'
+            '"confidence":0.8,"evidence":"可见操作台'
+        )
+        semantic = normalize_semantic(result)
+        counter = next(
+            item for item in semantic["visible_elements"] if item["id"] == "counter"
+        )
+        self.assertTrue(counter["visible"])
+
+    def test_repairs_json_truncated_after_field_colon(self):
+        result = repair_truncated_json(
+            '{"camera_type":"kitchen","view_valid":true,'
+            '"business_scene_summary":"",'
+            '"confidence":'
+        )
+        semantic = normalize_semantic(result)
+        self.assertEqual(semantic["camera_type"], "kitchen")
+        self.assertEqual(semantic["confidence"], 0.0)
+
     def test_schema_lists_all_canonical_elements(self):
         properties = RESPONSE_SCHEMA["properties"]["visible_elements"]["items"]["properties"]
         self.assertIn("oil_fryer", properties["id"]["enum"])
         self.assertIn("cash_register", properties["id"]["enum"])
         self.assertIn("refrigerator", properties["id"]["enum"])
+        self.assertIn("breading_area", properties["id"]["enum"])
         self.assertIn(
             "store_entrance",
             RESPONSE_SCHEMA["properties"]["camera_type"]["enum"],
@@ -150,6 +174,24 @@ class SemanticDecisionTests(unittest.TestCase):
         self.assertEqual(result["decision"], "pass", result)
         self.assertEqual(result["module_results"]["element_match"]["hit_count"], 3)
         self.assertEqual(result["module_results"]["element_match"]["status"], "pass")
+        self.assertGreaterEqual(result["metrics"]["element_score"], 0.09)
+
+    def test_breading_area_is_a_kitchen_element(self):
+        result = fuse_semantic_decision(
+            cv_result(),
+            semantic(
+                visible_elements=[
+                    {
+                        "id": "breading_area",
+                        "visible": True,
+                        "confidence": 0.9,
+                        "evidence": "裹粉台清晰",
+                    }
+                ]
+            ),
+            self.config,
+        )
+        self.assertIn("breading_area", result["metrics"]["element_hit_ids"])
         self.assertGreaterEqual(result["metrics"]["element_score"], 0.09)
 
     def test_kitchen_without_visible_elements_goes_to_review(self):
@@ -576,6 +618,26 @@ class SemanticDecisionTests(unittest.TestCase):
         )
         self.assertEqual(result["decision"], "review", result)
         self.assertTrue(any("核心业务区域覆盖不明确" in reason for reason in result["reasons"]))
+
+    def test_high_element_score_with_low_model_confidence_reports_correct_reason(self):
+        result = fuse_semantic_decision(
+            cv_result(),
+            semantic(confidence=0.4),
+            self.config,
+        )
+        self.assertEqual(result["decision"], "review", result)
+        reason = "；".join(result["reasons"])
+        self.assertIn("已达到", reason)
+        self.assertIn("模型置信度仅 40%", reason)
+        self.assertNotIn("低于 9%", reason)
+
+    def test_high_element_score_with_missing_confidence_passes(self):
+        result = fuse_semantic_decision(
+            cv_result(),
+            semantic(confidence=0.0),
+            self.config,
+        )
+        self.assertEqual(result["decision"], "pass", result)
 
     def test_centered_flag_false_does_not_override_valid_business_coverage(self):
         result = fuse_semantic_decision(
