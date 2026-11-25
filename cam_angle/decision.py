@@ -797,10 +797,32 @@ def fuse_semantic_decision(
     else:
         decision = "pass"
         reasons = []
-        confidence = min(
-            [vlm_conf]
-            + [float(m.get("confidence", 0.0)) for m in (quality, blur, rotation) if m]
-        )
+        conf_values = [vlm_conf]
+        for module in (quality, blur, rotation):
+            if module and module.get("status") != "skipped":
+                conf_values.append(float(module.get("confidence", 0.0)))
+        confidence = min(conf_values)
+
+    # 后厨/收银等作业场景中，模型可能把大面积雾气、透明薄膜、纸箱或窗框
+    # 前景判成局部干扰。这里用 OpenCV 的边界低清晰度与整体结构密度做一道
+    # 保守拦截：不让这些明显可疑的画面直接合格。
+    if (
+        decision == "pass"
+        and semantic_available
+        and camera_type in {"kitchen", "cashier", "kitchen_cashier"}
+    ):
+        sem_metrics = semantic_result.get("metrics") or {}
+        cv_metrics = dict(cv_result.get("metrics") or {})
+        focus = sem_metrics.get("vlm_foreground_focus_suspicion") or {}
+        border_low_focus = float(focus.get("border_low_focus_ratio", 0.0))
+        blur_var = float(cv_metrics.get("blur_var", 0.0))
+        edge_density = float(cv_metrics.get("edge_density", 0.0))
+        if border_low_focus >= 0.35 and blur_var < 250.0:
+            decision = "review"
+            reasons.append(
+                "quality: 画面边缘/前景存在大面积低清晰度或遮挡风险，转人工复核"
+            )
+            confidence = min(0.75, confidence)
 
     operation_impact = "unknown"
     if hand_action_visible:

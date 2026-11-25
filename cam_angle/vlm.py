@@ -288,7 +288,7 @@ OBSTRUCTION_VERIFY_PROMPT = """只做镜头空间可用性复核。
 天花板、吊顶、灯具和空调出风口不是业务锚点。它们占据画面上半部主体、业务区只在底部露出一部分时，应判 scene_usable=false。
 镜头自身外壳、防护罩、支架、机器盖板或与业务无关的邻近设备外壳不属于正常场景边界；它们占据较大画幅并把业务区挤到一侧时，应判 scene_usable=false。
 雨棚、遮阳伞、帆布、篷布等表面即使属于正常设施，只要紧贴镜头并占据画面主体，只在边缘露出少量目标区域，也应判 scene_usable=false。
-密集网格、笼架、护栏或筛网形成大面积连续前景屏障时，即使能部分透视，只要把业务区挤到一侧或明显削弱核心区域可读性，也应判 scene_usable=false。单根细线或少量稀疏线条才可作为局部干扰。
+密集网格、笼架、护栏、筛网或风扇网罩形成大面积连续前景屏障时，只有它把业务区挤到一侧、并遮住员工手部、完整操作台/交易面或展示柜主要区域，导致核心动作无法辨认时，才判 scene_usable=false。单根细线、少量稀疏线条、画面底部/侧边的风扇网罩，只要核心业务仍清楚可监控，都只算局部干扰。
 如果近镜头物体从上方和下方同时侵入画面，只剩中间一条窄窗口能看到业务区，即使设备局部可见，也属于多面前景夹击，应判 scene_usable=false。
 近镜头移动物体或非固定结构形成连续纵向屏障，把业务区切成窄条时，应判 scene_usable=false。但固定立柱、门框或固定隔断只是分割画面时，只要另一侧仍有一个完整业务工作区、完整操作面或完整交易面清楚可监控，就不属于中层遮挡，scene_usable=true；只有分割后没有任何完整业务单元可读时才失败。
 后厨、收银等作业场景必须包含可用工作平面、设备正面/操作界面、交易区或实际作业区域。只看到设备顶部、背面、外壳、布线、墙面、天花板或空地面时，按无业务锚点处理，scene_usable=false。
@@ -300,9 +300,9 @@ OBSTRUCTION_VERIFY_PROMPT = """只做镜头空间可用性复核。
 员工和顾客通常是监控业务主体，不是中层遮挡物；但如果人员形成横跨画面的大面积模糊前景带，遮住操作台、核心动作或主要业务区域，应按严重遮挡处理，scene_usable=false。
 吊顶附近的线缆、管道、吊扇、灯具和支架横穿画面上方时，如果操作台、人员手部和核心作业面仍然清楚，不计入中层遮挡，也不能按线缆外接范围估计遮挡比例。
 如果画面中至少一名员工的手部、手臂和具体工作动作清楚可见，且业务工作区仍能识别，前景网罩、边框、立柱或局部结构不能单独构成 narrow_side_view 或 scene_usable=false；只有核心业务活动确实无法观察时才判不可用。
-物体名称、颜色和材质不影响判断。中间层是否成立只看空间关系：画面中明显更近、连续覆盖核心操作面的箱体、薄膜、包装、设备盖板或其他前景区域，就是 middle_layer_intrusion=true，不能因为后方仍能看到员工、局部设备或边缘纹理而改成 false。
-如果前景层明显覆盖目标且只留下边缘或窄带可读区域，必须填 affects_core_area=true、lens_obstructed=true、scene_usable=false；员工仍能露出手部或背景局部清晰，不能抵消完整工位已被切断。
-foreground_area_ratio>=0.30 且 target_overlap_ratio>=0.20，或大面积半透明薄膜/近景包装覆盖目标时，不能判“无中间层”。只有独立前景没有覆盖核心工作区、完整操作面和人员动作仍连续可辨时，才可 scene_usable=true。
+物体名称、颜色和材质不影响判断，但风扇罩、排烟管、通风管、吊架、固定墙面/柜体侧板、透明挡帘、玻璃反光和画面边缘模糊前景不属于中间层；只有它们实际遮住员工手部、完整操作台/交易面或展示柜主要区域，导致动作无法辨认时，才计入遮挡。中间层是否成立只看空间关系：画面中明显更近、连续覆盖核心操作面的箱体、薄膜、包装、设备盖板或其他前景区域，才是 middle_layer_intrusion=true，不能因为后方仍能看到员工、局部设备或边缘纹理而改成 false。
+只有前景层把目标压成只剩边缘窄缝、且员工手部、完整操作台/交易面或展示柜主要区域无法辨认时，才填 affects_core_area=true、lens_obstructed=true、scene_usable=false。员工手部动作清晰、操作台面完整可辨、展示柜食物可见时，必须 scene_usable=true。
+foreground_area_ratio>=0.50 且 target_overlap_ratio>=0.50，或大面积半透明薄膜/近景包装完整盖住目标时，才不能判“无中间层”。只要核心工作区、完整操作面和人员动作仍连续可辨，就必须 scene_usable=true。
 目标居中程度、画面占比、目标偏侧和固定结构面积均不能单独决定失败，但目标只剩边缘局部、无法完成持续监控时属于失败。
 输出中文 evidence，并严格按结构输出。"""
 
@@ -495,8 +495,8 @@ def normalize_obstruction_verification(raw: Dict[str, Any]) -> Dict[str, Any]:
     )
     middle_layer_intrusion = _as_bool(raw.get("middle_layer_intrusion"))
     if (
-        foreground_ratio >= 0.20
-        and target_overlap_ratio >= 0.20
+        foreground_ratio >= 0.50
+        and target_overlap_ratio >= 0.50
         and not fixed_plane_evidence
         and not fixed_divider_exemption
     ):
@@ -531,7 +531,7 @@ def normalize_obstruction_verification(raw: Dict[str, Any]) -> Dict[str, Any]:
         affects_core_area = bool(
             middle_layer_intrusion
             and (
-                target_overlap_ratio >= 0.20
+                target_overlap_ratio >= 0.50
                 or not model_scene_usable
             )
         )

@@ -179,8 +179,8 @@ class SemanticNormalizationTests(unittest.TestCase):
             "obstruction_type": "none",
             "evidence": "前方箱体占据下部，后方员工可见",
         })
-        self.assertTrue(result["middle_layer_intrusion"])
-        self.assertTrue(result["affects_core_area"])
+        self.assertFalse(result["middle_layer_intrusion"])
+        self.assertFalse(result["affects_core_area"])
         self.assertFalse(result["lens_obstructed"])
         self.assertTrue(result["scene_usable"])
 
