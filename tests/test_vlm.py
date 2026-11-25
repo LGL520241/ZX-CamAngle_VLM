@@ -683,7 +683,7 @@ class SemanticDecisionTests(unittest.TestCase):
         self.assertEqual(result["decision"], "fail", result)
         self.assertTrue(any("影响人员行为判断" in reason for reason in result["reasons"]))
 
-    def test_qwen_large_area_not_affecting_subject_passes(self):
+    def test_qwen_large_area_not_affecting_subject_fails(self):
         result = fuse_semantic_decision(
             cv_result(occlusion="skipped", ratio=0.0),
             semantic(
@@ -693,8 +693,8 @@ class SemanticDecisionTests(unittest.TestCase):
             ),
             self.config,
         )
-        self.assertEqual(result["decision"], "pass", result)
-        self.assertEqual(result["reasons"], [])
+        self.assertEqual(result["decision"], "fail", result)
+        self.assertTrue(any("前景遮挡面积过大" in reason for reason in result["reasons"]))
 
     def test_qwen_small_occlusion_not_affecting_subject_passes(self):
         result = fuse_semantic_decision(
@@ -927,7 +927,7 @@ class SemanticDecisionTests(unittest.TestCase):
         )
         self.assertEqual(result["decision"], "pass", result)
 
-    def test_occlusion_can_be_overridden_when_hand_action_is_clear(self):
+    def test_occlusion_not_overridden_when_severe_and_hand_action_is_clear(self):
         result = fuse_semantic_decision(
             cv_result(occlusion="fail", ratio=0.50),
             semantic(
@@ -939,9 +939,9 @@ class SemanticDecisionTests(unittest.TestCase):
             ),
             self.config,
         )
-        self.assertEqual(result["decision"], "pass", result)
+        self.assertEqual(result["decision"], "fail", result)
 
-    def test_severe_semantic_blur_can_be_overridden_by_clear_business_subject(self):
+    def test_severe_semantic_blur_not_overridden_by_clear_business_subject(self):
         cv = cv_result(occlusion="skipped", blur="skipped")
         cv["module_results"]["quality_guard"] = {
             "available": True,
@@ -961,7 +961,7 @@ class SemanticDecisionTests(unittest.TestCase):
             ),
             self.config,
         )
-        self.assertEqual(result["decision"], "pass", result)
+        self.assertEqual(result["decision"], "fail", result)
 
     def test_unusable_severe_blur_with_low_texture_directly_fails(self):
         cv = cv_result(quality="warn", occlusion="skipped", blur="skipped")

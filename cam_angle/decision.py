@@ -51,6 +51,7 @@ _AREA_EVIDENCE_TERMS = (
 
 _NO_BUSINESS_ANCHOR_PHRASES = (
     "无业务锚点",
+    "无核心业务区",
     "无完整业务锚点",
     "无明确业务锚点",
     "无可用业务区域",
@@ -551,6 +552,23 @@ def fuse_semantic_decision(
             + (f"（{semantics.get('view_evidence')}）" if semantics.get("view_evidence") else "")
         )
 
+    # 室内作业场景即使局部仍可辨，前景遮挡面积过大也不能放行。
+    large_partial_occlusion = (
+        semantic_available
+        and camera_type in {"kitchen", "cashier", "kitchen_cashier"}
+        and vlm_occlusion == "partial"
+        and semantic_occlusion_ratio >= 0.40
+    )
+    if large_partial_occlusion:
+        hard_failures.append(
+            "occlusion: 前景遮挡面积过大，核心工作区已受影响"
+            + (
+                f"（{semantics.get('occlusion_evidence')}）"
+                if semantics.get("occlusion_evidence")
+                else ""
+            )
+        )
+
     # 主业务区域可以位于中央、下部或侧中部。不能用单个
     # primary_subject_central 缺省值推翻已有的有效覆盖证据。
     positive_business_coverage = (
@@ -803,6 +821,37 @@ def fuse_semantic_decision(
                 conf_values.append(float(module.get("confidence", 0.0)))
         confidence = min(conf_values)
 
+    # 作业场景覆盖必须足够。模型把 small/none 判成 pass 属于字段矛盾，
+    # 不能因为元素命中率高就放行。
+    if (
+        decision == "pass"
+        and semantic_available
+        and camera_type in {"kitchen", "cashier", "kitchen_cashier"}
+        and subject_coverage in {"small", "none"}
+    ):
+        decision = "fail"
+        reasons.append("camera_view: 核心业务区覆盖不足，不能判合格")
+        confidence = min(0.95, confidence)
+
+    if decision == "pass" and semantic_available and camera_type == "storage":
+        storage_evidence_text = " ".join(
+            str(semantics.get(key) or "")
+            for key in ("view_evidence", "occlusion_evidence", "business_scene_summary")
+        )
+        if any(
+            term in storage_evidence_text
+            for term in (
+                "无核心业务区",
+                "塑料膜覆盖纸杯",
+                "纸箱堆压",
+                "占满画面",
+                "看不到整体布局",
+            )
+        ):
+            decision = "fail"
+            reasons.append("camera_view: 仓储画面整体不可辨，不能判合格")
+            confidence = min(0.95, confidence)
+
     # 后厨/收银等作业场景中，模型可能把大面积雾气、透明薄膜、纸箱或窗框
     # 前景判成局部干扰。这里用 OpenCV 的边界低清晰度与整体结构密度做一道
     # 保守拦截：不让这些明显可疑的画面直接合格。
@@ -855,11 +904,20 @@ def fuse_semantic_decision(
             for reason in hard_failures
         )
         if (
-            hand_action_visible
+            (
+                hand_action_visible
+                and not blocking_occlusion
+                and not blocking_blur
+                and not unusable_severe_blur
+                and not large_partial_occlusion
+            )
             or (
                 business_subject_visible
                 and technical_failure
+                and not blocking_occlusion
+                and not blocking_blur
                 and not unusable_severe_blur
+                and not large_partial_occlusion
             )
         ) and target_area_verified:
             decision = "pass"

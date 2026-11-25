@@ -15,7 +15,7 @@ SYSTEM_PROMPT = """你是餐饮门店监控摄像头可用性审核专家。只�
 — 画面主体只是墙面、天花板、空地面、设备顶部/背面/内部、配电箱或维护结构，没有完整业务锚点，必须 unknown 或 wall_ceiling、view_valid=false、subject_coverage=none。只有完整操作台、完整交易面或设备正面整体清楚可监控时，subject_coverage 才能是 medium/large；只看到收银机屏幕、台面一角或设备局部时，必须 subject_coverage=small/none，并按 too_close/wrong_area/obstructed 处理。
 
 场景设施/局部干扰（不要判失败）：
-— 风扇/风扇网罩、排烟管/通风管、吊顶吊架/金属框架、固定墙面/柜体侧板/卷帘门、画面边缘轻微模糊前景，只要不遮住员工手部、完整操作台/交易面或展示柜主要区域，都只算局部干扰，occlusion=none 或 partial/peripheral，view_valid=true。
+— 风扇/风扇网罩、排烟管/通风管、吊顶吊架/金属框架、固定墙面/柜体侧板/卷帘门、画面边缘轻微模糊前景，只要位于边缘且面积小，就只算局部干扰，occlusion=none 或 partial/peripheral。但如果风扇/风扇网罩、密集网格占据画面主体并连续遮住完整操作台/交易面或展示柜主要区域，即使员工手部可见，也必须按 severe/critical，view_valid=false。
 — 固定墙面、卷帘门或柜体侧板只占一侧，另一侧仍有完整工作单元清楚可监控时，不填 narrow_side_view/core_area_split，也不判 wrong_area/obstructed。
 
 结论一致性：
