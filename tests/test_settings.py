@@ -15,6 +15,7 @@ from cam_angle.config import (
     validate_module_switches,
     validate_thresholds,
 )
+from cam_angle.auth import hash_password, issue_session_token, normalize_permissions, session_expiry
 from cam_angle.database import Database
 
 
@@ -22,11 +23,14 @@ class AsgiTestClient:
     """直接请求 ASGI 应用，兼容仓库使用的不同 Starlette 版本。"""
     def __init__(self, app):
         self.app = app
+        self.cookies = {}
 
     def request(self, method, url, **kwargs):
         async def send():
             transport = httpx.ASGITransport(app=self.app)
             async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                if self.cookies:
+                    client.cookies.update(self.cookies)
                 return await client.request(method, url, **kwargs)
         return asyncio.run(send())
 
@@ -155,6 +159,16 @@ class OcclusionApiTests(unittest.TestCase):
         self.main.config = self.config
         self.main.db = self.db
         self.client = AsgiTestClient(self.main.app)
+        admin_id = self.db.create_user(
+            "test_admin",
+            hash_password("test-password"),
+            "测试管理员",
+            "admin",
+            normalize_permissions("admin"),
+        )
+        token, token_hash = issue_session_token()
+        self.db.create_session(token_hash, admin_id, session_expiry(12))
+        self.client.cookies["camangle_session"] = token
         self.camera_id = self.db.upsert_camera("TEST", 1, channel_name="测试相机")
         self.image_path = self.root / "sample.jpg"
         self.image_path.write_bytes(b"test capture")
@@ -168,6 +182,80 @@ class OcclusionApiTests(unittest.TestCase):
                                    "2026-11-20T12:00:00+08:00", decision=decision,
                                    module_results=modules, baseline_id=baseline_id,
                                    batch_id=batch_id)
+
+    def test_authentication_and_permission_enforcement(self):
+        anonymous = AsgiTestClient(self.main.app)
+        self.assertEqual(anonymous.get("/api/stats").status_code, 401)
+        viewer_id = self.db.create_user(
+            "viewer_test",
+            hash_password("viewer-password"),
+            "只读用户",
+            "viewer",
+            normalize_permissions("viewer"),
+        )
+        token, token_hash = issue_session_token()
+        self.db.create_session(token_hash, viewer_id, session_expiry(12))
+        viewer = AsgiTestClient(self.main.app)
+        viewer.cookies["camangle_session"] = token
+        self.assertEqual(viewer.get("/api/stats").status_code, 200)
+        self.assertEqual(
+            viewer.put("/api/settings", json={"capture_interval": 8}).status_code,
+            403,
+        )
+        self.assertEqual(viewer.post("/api/cycle/start").status_code, 403)
+        self.assertEqual(viewer.get("/api/users").status_code, 403)
+
+    def test_admin_can_create_user_and_generate_batch_report(self):
+        created = self.client.post("/api/users", json={
+            "username": "reviewer_test",
+            "display_name": "审核测试",
+            "password": "reviewer-password",
+            "role": "reviewer",
+            "permissions": ["review.write"],
+        })
+        self.assertEqual(created.status_code, 200, created.text)
+        self.assertEqual(created.json()["user"]["role"], "reviewer")
+        batch_id = self.db.create_batch("2026-11-20T12:00:00+08:00")
+        self.make_capture(decision="pass", batch_id=batch_id)
+        self.make_capture(decision="fail", batch_id=batch_id)
+        report = self.client.get(f"/api/reports/{batch_id}")
+        self.assertEqual(report.status_code, 200, report.text)
+        self.assertEqual(report.json()["summary"]["total"], 2)
+        self.assertEqual(report.json()["by_decision"]["fail"], 1)
+
+    def test_camera_list_includes_latest_capture_thumbnail_url(self):
+        batch_id = self.db.create_batch("2026-11-20T12:00:00+08:00")
+        capture_id = self.db.add_capture(
+            self.camera_id,
+            str(self.image_path),
+            str(self.image_path),
+            "test",
+            0,
+            "2026-11-20T12:00:00+08:00",
+            decision="pass",
+            batch_id=batch_id,
+        )
+        camera = self.client.get(f"/api/cameras?batch_id={batch_id}&limit=10").json()["rows"][0]
+        self.assertEqual(
+            camera["last_capture"]["thumb_url"],
+            f"/api/captures/{capture_id}/thumb",
+        )
+
+    def test_review_queue_uses_lightweight_capture_summary(self):
+        batch_id = self.db.create_batch("2026-11-20T12:00:00+08:00")
+        capture_id = self.make_capture(
+            modules={"semantic": {"status": "pass", "large": "x" * 2000}},
+            decision="review",
+            batch_id=batch_id,
+        )
+        response = self.client.get(f"/api/review-queue?batch_id={batch_id}")
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["total"], 1)
+        self.assertEqual(payload["stats"]["by_decision"]["review"], 1)
+        self.assertEqual(payload["rows"][0]["id"], capture_id)
+        self.assertNotIn("module_results", payload["rows"][0])
+        self.assertNotIn("metrics", payload["rows"][0])
 
     def test_batches_isolate_stats_and_paginate_capture_results(self):
         first_batch = self.db.create_batch("2026-11-20T12:00:00+08:00")

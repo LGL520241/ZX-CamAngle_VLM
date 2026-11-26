@@ -50,6 +50,12 @@ class Config:
         default_factory=lambda: int(os.getenv("INFERENCE_CONCURRENCY", "24"))
     )
     capture_interval: float = field(default_factory=lambda: float(os.getenv("CAPTURE_INTERVAL", "5.0")))
+    auth_session_hours: int = field(
+        default_factory=lambda: int(os.getenv("AUTH_SESSION_HOURS", "12"))
+    )
+    auth_cookie_secure: bool = field(
+        default_factory=lambda: _env_bool("AUTH_COOKIE_SECURE", False)
+    )
     pipeline_mode: str = field(
         default_factory=lambda: os.getenv("PIPELINE_MODE", PIPELINE_MODE_DEFAULTS)
     )

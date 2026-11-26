@@ -19,7 +19,12 @@ from .decision import fuse_semantic_decision
 from .demo import render_demo_image, seed_demo
 from .hikvision import HikvisionClient
 from .occlusion import analyze_occlusion
+from .report import build_batch_report
 from .vlm import QwenSemanticClient
+
+
+class CycleStopped(Exception):
+    """用于在线程安全的协作点终止巡检任务。"""
 
 
 def _now() -> str:
@@ -103,9 +108,13 @@ class Pipeline:
         # 在运行中的事件循环内创建锁，兼容 Python 3.9 的事件循环绑定。
         self._lock: Optional[asyncio.Lock] = None
         self._running = False
+        self._pause_event: Optional[asyncio.Event] = None
+        self._stop_event: Optional[asyncio.Event] = None
         self._active_tasks: Dict[int, Dict[str, Any]] = {}
         self._cycle_counts: Dict[str, int] = {"pass": 0, "fail": 0, "review": 0, "no_signal": 0}
         self._cycle_start_mono: float = 0.0
+        self._paused_total: float = 0.0
+        self._paused_since: Optional[float] = None
         self._batch_id: Optional[int] = None
         self._cycle_dir: Optional[Path] = None
         self._cycle_pipeline_mode: str = config.pipeline_mode
@@ -141,7 +150,13 @@ class Pipeline:
         processed = int(self.db.get_cycle("processed", 0))
         total = int(self.db.get_cycle("total", 0))
         percent = round(processed * 100 / total, 1) if total else 0.0
-        elapsed = time.monotonic() - self._cycle_start_mono if self._cycle_start_mono else 0.0
+        now_mono = time.monotonic()
+        paused_now = now_mono - self._paused_since if self._paused_since is not None else 0.0
+        elapsed = (
+            now_mono - self._cycle_start_mono - self._paused_total - paused_now
+            if self._cycle_start_mono
+            else 0.0
+        )
         rate = processed / elapsed if elapsed > 0 else 0.0
         eta = (total - processed) / rate if rate > 0 else 0.0
         return {
@@ -158,6 +173,82 @@ class Pipeline:
             "rate_per_sec": round(rate, 2),
             "eta_seconds": int(eta),
         }
+
+    def _ensure_control_events(self) -> None:
+        if self._pause_event is None:
+            self._pause_event = asyncio.Event()
+            self._pause_event.set()
+        if self._stop_event is None:
+            self._stop_event = asyncio.Event()
+
+    async def _checkpoint(self) -> None:
+        self._ensure_control_events()
+        if self._stop_event and self._stop_event.is_set():
+            raise CycleStopped()
+        if self._pause_event and not self._pause_event.is_set():
+            if self._paused_since is None:
+                self._paused_since = time.monotonic()
+            self.db.set_cycle("state", "paused")
+            if self._batch_id is not None:
+                self.db.update_batch(self._batch_id, state="paused")
+            await self._pause_event.wait()
+            if self._stop_event and self._stop_event.is_set():
+                raise CycleStopped()
+            if self._paused_since is not None:
+                self._paused_total += time.monotonic() - self._paused_since
+                self._paused_since = None
+            self.db.set_cycle("state", "running")
+            if self._batch_id is not None:
+                self.db.update_batch(self._batch_id, state="running")
+
+    def pause_cycle(self) -> Dict[str, Any]:
+        if not self._running:
+            return {"status": "not_running"}
+        self._ensure_control_events()
+        assert self._pause_event is not None
+        self._pause_event.clear()
+        if self._paused_since is None:
+            self._paused_since = time.monotonic()
+        self.db.set_cycle("state", "paused")
+        if self._batch_id is not None:
+            self.db.update_batch(self._batch_id, state="paused")
+        return {"status": "paused", "batch_id": self._batch_id}
+
+    def resume_cycle(self) -> Dict[str, Any]:
+        if not self._running:
+            return {"status": "not_running"}
+        self._ensure_control_events()
+        assert self._pause_event is not None
+        self._pause_event.set()
+        if self._paused_since is not None:
+            self._paused_total += time.monotonic() - self._paused_since
+            self._paused_since = None
+        self.db.set_cycle("state", "running")
+        if self._batch_id is not None:
+            self.db.update_batch(self._batch_id, state="running")
+        return {"status": "running", "batch_id": self._batch_id}
+
+    def stop_cycle(self) -> Dict[str, Any]:
+        if not self._running:
+            return {"status": "not_running"}
+        self._ensure_control_events()
+        assert self._stop_event is not None
+        assert self._pause_event is not None
+        self._stop_event.set()
+        self._pause_event.set()
+        self.db.set_cycle("state", "stopping")
+        return {"status": "stopping", "batch_id": self._batch_id}
+
+    def reserve_cycle(self) -> bool:
+        if self._running:
+            return False
+        self._running = True
+        self._ensure_control_events()
+        assert self._pause_event is not None
+        assert self._stop_event is not None
+        self._pause_event.set()
+        self._stop_event.clear()
+        return True
 
     async def ensure_cameras(self) -> int:
         if self.config.demo_mode:
@@ -250,6 +341,7 @@ class Pipeline:
 
     async def _capture_camera_only(self, camera: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """解耦链路第一阶段：只抓图、下载和解码，不执行推理。"""
+        await self._checkpoint()
         if self._cycle_dir is None:
             raise RuntimeError("巡检产物目录尚未初始化")
         capture_started_at = _now()
@@ -284,6 +376,7 @@ class Pipeline:
                     raise RuntimeError("下载图片解码失败")
                 source = "capture"
             _save_thumb(img, thumb_path)
+            await self._checkpoint()
             return {
                 "camera": camera,
                 "capture_time": capture_started_at,
@@ -291,6 +384,9 @@ class Pipeline:
                 "source": source,
                 "quality": 0,
             }
+        except CycleStopped:
+            self._finish_progress(camera["id"])
+            raise
         except Exception as exc:
             result = self._record_capture_error(camera, capture_started_at, paths, exc)
             self._finish_progress(camera["id"], result["decision"])
@@ -306,6 +402,7 @@ class Pipeline:
         channel_no = camera["channel_no"]
         if self._cycle_dir is None:
             raise RuntimeError("巡检产物目录尚未初始化")
+        await self._checkpoint()
         capture_started_at = captured["capture_time"] if captured else _now()
         paths = captured["paths"] if captured else self.artifacts.capture_paths(
             self._cycle_dir, capture_started_at, serial, channel_no
@@ -344,6 +441,8 @@ class Pipeline:
                 source = "capture"
                 quality = 0
 
+            await self._checkpoint()
+
             self._set_progress(camera, "分析")
             if captured is None:
                 _save_thumb(img, thumb_path)
@@ -367,6 +466,7 @@ class Pipeline:
             })
 
             self._set_progress(camera, "语义分析")
+            await self._checkpoint()
             qwen_enabled = bool(
                 self._cycle_module_switches.get("qwen_semantic", True)
                 and self.config.vlm_enabled
@@ -444,6 +544,7 @@ class Pipeline:
             self.artifacts.write_json(paths["analysis"], analysis)
             baseline_id = analysis.get("baseline_id")
             self._set_progress(camera, "入库")
+            await self._checkpoint()
             capture_id = self.db.add_capture(
                 camera_id=camera_id,
                 path=str(image_path),
@@ -480,6 +581,8 @@ class Pipeline:
                 "reasons": analysis["reasons"],
                 "artifact_dir": str(self._cycle_dir),
             })
+        except CycleStopped:
+            result = None
         except Exception as exc:  # 抓图失败也要留痕
             result = self._record_capture_error(
                 camera, capture_started_at, paths, exc
@@ -488,11 +591,19 @@ class Pipeline:
             self._finish_progress(camera_id, result.get("decision") if result else None)
         return result
 
-    async def run_cycle(self) -> Dict[str, Any]:
-        if self._running:
+    async def run_cycle(self, reserved: bool = False) -> Dict[str, Any]:
+        if not reserved and self._running:
             return {"status": "already_running"}
+        self._ensure_control_events()
+        assert self._pause_event is not None
+        assert self._stop_event is not None
+        if not reserved:
+            self._pause_event.set()
+            self._stop_event.clear()
         self._running = True
         self._cycle_start_mono = time.monotonic()
+        self._paused_total = 0.0
+        self._paused_since = None
         self._active_tasks.clear()
         started_at = _now()
         batch_id = self.db.create_batch(started_at)
@@ -544,16 +655,25 @@ class Pipeline:
             self.db.update_batch(batch_id, total=total)
             self._lock = asyncio.Lock()
             processed = 0
+            stopped = False
             if self._cycle_pipeline_mode == "decoupled":
                 capture_sem = asyncio.Semaphore(max(1, self.config.capture_concurrency))
 
                 async def capture_worker(cam: Dict[str, Any]):
+                    await self._checkpoint()
                     async with capture_sem:
                         return await self._capture_camera_only(cam)
 
                 captured_items = []
                 for fut in asyncio.as_completed([capture_worker(c) for c in cameras]):
-                    captured = await fut
+                    try:
+                        captured = await fut
+                    except CycleStopped:
+                        stopped = True
+                        continue
+                    if self._stop_event and self._stop_event.is_set():
+                        stopped = True
+                        continue
                     if captured is not None:
                         captured_items.append(captured)
                     else:
@@ -561,37 +681,86 @@ class Pipeline:
                         self.db.set_cycle("processed", processed)
                         self.db.update_batch(batch_id, processed=processed, state="running")
 
-                inference_sem = asyncio.Semaphore(
-                    max(1, self.config.inference_concurrency)
-                )
+                if not stopped:
+                    inference_sem = asyncio.Semaphore(
+                        max(1, self.config.inference_concurrency)
+                    )
 
-                async def inference_worker(captured: Dict[str, Any]):
-                    async with inference_sem:
-                        return await self._process_camera(
-                            captured["camera"], captured
-                        )
+                    async def inference_worker(captured: Dict[str, Any]):
+                        await self._checkpoint()
+                        async with inference_sem:
+                            return await self._process_camera(
+                                captured["camera"], captured
+                            )
 
-                for fut in asyncio.as_completed(
-                    [inference_worker(item) for item in captured_items]
-                ):
-                    await fut
-                    processed += 1
-                    self.db.set_cycle("processed", processed)
-                    self.db.set_cycle("state", "running")
-                    self.db.update_batch(batch_id, processed=processed, state="running")
+                    for fut in asyncio.as_completed(
+                        [inference_worker(item) for item in captured_items]
+                    ):
+                        try:
+                            await fut
+                        except CycleStopped:
+                            stopped = True
+                            continue
+                        if self._stop_event and self._stop_event.is_set():
+                            stopped = True
+                            continue
+                        processed += 1
+                        self.db.set_cycle("processed", processed)
+                        self.db.set_cycle("state", "running")
+                        self.db.update_batch(batch_id, processed=processed, state="running")
             else:
                 sem = asyncio.Semaphore(max(1, self.config.concurrency))
 
                 async def worker(cam: Dict[str, Any]) -> Dict[str, Any]:
+                    await self._checkpoint()
                     async with sem:
                         return await self._process_camera(cam)
 
                 for fut in asyncio.as_completed([worker(c) for c in cameras]):
-                    await fut
+                    try:
+                        await fut
+                    except CycleStopped:
+                        stopped = True
+                        continue
+                    if self._stop_event and self._stop_event.is_set():
+                        stopped = True
+                        continue
                     processed += 1
                     self.db.set_cycle("processed", processed)
                     self.db.set_cycle("state", "running")
                     self.db.update_batch(batch_id, processed=processed, state="running")
+
+            if stopped:
+                self.db.set_cycle("state", "stopped")
+                finished_at = _now()
+                self.db.set_cycle("finished_at", finished_at)
+                self.db.update_batch(
+                    batch_id,
+                    state="stopped",
+                    processed=processed,
+                    finished_at=finished_at,
+                    error="用户停止巡检",
+                )
+                summary = {
+                    "status": "stopped",
+                    "batch_id": batch_id,
+                    "total": total,
+                    "processed": processed,
+                    "started_at": started_at,
+                    "finished_at": finished_at,
+                    "by_decision": dict(self._cycle_counts),
+                    "artifact_dir": str(self._cycle_dir),
+                }
+                self.artifacts.write_cycle(self._cycle_dir, summary)
+                self.artifacts.append_event(self._cycle_dir, {"phase": "cycle_stopped", **summary})
+                try:
+                    self.artifacts.write_json(
+                        self._cycle_dir / "report.json",
+                        build_batch_report(self.db, batch_id),
+                    )
+                except Exception:
+                    pass
+                return summary
 
             self.db.set_cycle("state", "finished")
             finished_at = _now()
@@ -618,6 +787,15 @@ class Pipeline:
             }
             self.artifacts.write_cycle(self._cycle_dir, summary)
             self.artifacts.append_event(self._cycle_dir, {"phase": "cycle_complete", **summary})
+            try:
+                self.artifacts.write_json(
+                    self._cycle_dir / "report.json",
+                    build_batch_report(self.db, batch_id),
+                )
+            except Exception as exc:
+                self.artifacts.append_event(
+                    self._cycle_dir, {"phase": "report_error", "error": str(exc)}
+                )
             return summary
         except Exception as exc:
             self.db.set_cycle("state", "error")
@@ -638,6 +816,13 @@ class Pipeline:
             }
             self.artifacts.write_cycle(self._cycle_dir, summary)
             self.artifacts.append_event(self._cycle_dir, {"phase": "cycle_error", **summary})
+            try:
+                self.artifacts.write_json(
+                    self._cycle_dir / "report.json",
+                    build_batch_report(self.db, batch_id),
+                )
+            except Exception:
+                pass
             return summary
         finally:
             self._running = False

@@ -9,6 +9,11 @@ function storedView(kind) {
 
 const state = {
   page: "dashboard",
+  currentUser: null,
+  authMeta: null,
+  editingUserId: null,
+  userRows: [],
+  reportCharts: [],
   chart: null,
   batches: [],
   batchId: null,
@@ -20,8 +25,14 @@ const state = {
   reviewPage: 1,
   reviewTotal: 0,
   detailIds: [],
+  reviewIds: [],
   detailIndex: -1,
   detailRequestId: 0,
+  detailStoreIds: [],
+  detailCurrentId: null,
+  detailMode: "queue",
+  detailQueueKind: "capture",
+  detailContextLabel: "",
   storeRows: [],
   storeFilter: "",
   storeName: "",
@@ -67,6 +78,9 @@ const labelMap = {
 const stateMap = {
   idle: "空闲",
   running: "巡检中",
+  paused: "已暂停",
+  stopping: "停止中",
+  stopped: "已停止",
   finished: "已完成",
   error: "出错",
 };
@@ -85,6 +99,84 @@ function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (char) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   })[char]);
+}
+
+function hasPermission(permission) {
+  const user = state.currentUser;
+  if (!user) return false;
+  return user.role === "admin" || (user.permissions || []).includes(permission);
+}
+
+function showAuthScreen(meta = null) {
+  const data = meta || { setup_required: false, authenticated: false };
+  const screen = document.getElementById("authScreen");
+  const loginForm = document.getElementById("loginForm");
+  const setupForm = document.getElementById("setupForm");
+  const setup = Boolean(data.setup_required);
+  document.body.classList.add("auth-pending");
+  screen.classList.remove("hidden");
+  loginForm.hidden = setup;
+  setupForm.hidden = !setup;
+  document.getElementById("authTitle").textContent = setup ? "初始化系统管理员" : "登录巡检平台";
+  document.getElementById("authSubtitle").textContent = setup
+    ? "这是系统首次启动，请创建第一个管理员账号。初始化入口会在此账号创建后自动关闭。"
+    : "使用账号登录后，根据角色权限访问检测、复核和运行配置。";
+  document.getElementById("authError").hidden = true;
+}
+
+function hideAuthScreen() {
+  document.getElementById("authScreen").classList.add("hidden");
+  document.body.classList.remove("auth-pending");
+}
+
+function applyUserPermissions(user) {
+  state.currentUser = user;
+  state.authMeta = user;
+  document.getElementById("currentUserName").textContent = user?.display_name || user?.username || "未登录";
+  document.getElementById("currentUserRole").textContent = user?.role_label || user?.role || "-";
+  document.getElementById("settingsNav").hidden = !hasPermission("settings.write");
+  document.getElementById("usersNav").hidden = !hasPermission("users.manage");
+  const canControlCycle = hasPermission("cycle.control");
+  document.getElementById("startCycle").disabled = !canControlCycle;
+  document.getElementById("startCycle").hidden = !canControlCycle;
+  const settingsPage = document.getElementById("page-settings");
+  settingsPage.querySelectorAll("input, textarea, select, button").forEach((element) => {
+    if (element.closest(".settings-head-actions") || element.id === "resetSettingsChanges") return;
+    element.disabled = !hasPermission("settings.write");
+  });
+  document.querySelectorAll("[data-save-settings]").forEach((button) => {
+    button.hidden = !hasPermission("settings.write");
+  });
+  document.getElementById("seedDemo").disabled =
+    !hasPermission("maintenance.run") || !document.getElementById("seedDemo").dataset.demoAllowed;
+}
+
+async function authRequest(path, body = null, method = "POST") {
+  const response = await fetch(path, {
+    method,
+    credentials: "same-origin",
+    cache: "no-store",
+    headers: body ? { "Content-Type": "application/json" } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.detail || "请求失败");
+  return data;
+}
+
+async function initializeAuthentication() {
+  const response = await fetch("/api/auth/status", {
+    credentials: "same-origin",
+    cache: "no-store",
+  });
+  const data = await response.json();
+  if (!data.authenticated) {
+    showAuthScreen(data);
+    return false;
+  }
+  applyUserPermissions(data.user);
+  hideAuthScreen();
+  return true;
 }
 
 function fmtPercent(value) {
@@ -177,11 +269,15 @@ function renderSemantic(result, elementResult) {
 async function api(path, options = {}) {
   const resp = await fetch(path, {
     cache: "no-store",
+    credentials: "same-origin",
     headers: { "Content-Type": "application/json" },
     ...options,
   });
   if (!resp.ok) {
     const text = await resp.text();
+    if (resp.status === 401 && !path.startsWith("/api/auth/")) {
+      showAuthScreen({ setup_required: false, authenticated: false });
+    }
     throw new Error(text || resp.statusText);
   }
   return resp.json();
@@ -572,6 +668,8 @@ function setStartCycleState(mode) {
     idle: { icon: "▶", title: "抓取最新画面", detail: "重新调用设备抓帧", disabled: false },
     starting: { icon: "◌", title: "正在启动", detail: "准备调用设备…", disabled: true },
     running: { icon: "◉", title: "正在抓取最新画面", detail: "本轮任务处理中", disabled: true },
+    paused: { icon: "Ⅱ", title: "巡检已暂停", detail: "使用“继续”恢复任务", disabled: true },
+    stopping: { icon: "■", title: "正在停止", detail: "等待当前协作任务结束", disabled: true },
   };
   const view = states[mode] || states.idle;
   btn.disabled = view.disabled;
@@ -582,10 +680,20 @@ function setStartCycleState(mode) {
 }
 
 function refreshStartButton(p) {
-  const running = Boolean(p && p.state === "running");
-  setStartCycleState(running ? "running" : "idle");
+  const cycleState = p?.state || "idle";
+  const active = ["running", "paused", "stopping"].includes(cycleState);
+  setStartCycleState(active ? cycleState : "idle");
+  const canControl = hasPermission("cycle.control");
+  const start = document.getElementById("startCycle");
+  if (start) start.disabled = !canControl || active;
+  const pauseButton = document.getElementById("pauseCycle");
+  const resumeButton = document.getElementById("resumeCycle");
+  const stopButton = document.getElementById("stopCycle");
+  if (pauseButton) pauseButton.hidden = !canControl || cycleState !== "running";
+  if (resumeButton) resumeButton.hidden = !canControl || cycleState !== "paused";
+  if (stopButton) stopButton.hidden = !canControl || !["running", "paused"].includes(cycleState);
   const sys = document.getElementById("sysState");
-  if (sys) sys.textContent = running ? "任务运行中" : "系统在线";
+  if (sys) sys.textContent = cycleState === "running" ? "任务运行中" : cycleState === "paused" ? "任务已暂停" : "系统在线";
 }
 
 function renderCaptureFlow(p) {
@@ -635,6 +743,8 @@ async function loadPage(page) {
   if (page === "cameras") await loadCameras();
   if (page === "captures") await loadCaptures();
   if (page === "review") await loadReview();
+  if (page === "reports") await loadReport();
+  if (page === "users") await loadUsersPage();
   if (page === "settings") await loadSettings();
 }
 
@@ -964,11 +1074,8 @@ async function loadReview(page = 1) {
     }));
     const query = document.getElementById("reviewSearch").value.trim();
     if (query) params.set("query", query);
-    const statsParams = withBatch(new URLSearchParams()).toString();
-    const [data, stats] = await Promise.all([
-      api(`/api/captures?${params.toString()}`),
-      api(`/api/stats${statsParams ? `?${statsParams}` : ""}`),
-    ]);
+    const data = await api(`/api/review-queue?${params.toString()}`);
+    const stats = data.stats || {};
     state.reviewTotal = Number(stats.by_decision?.review || 0);
     state.reviewPage = page;
     document.getElementById("reviewQueueCount").textContent = state.reviewTotal;
@@ -993,14 +1100,26 @@ async function loadReview(page = 1) {
 }
 
 function renderReviewCards(rows) {
+  state.reviewIds = rows.map((capture) => Number(capture.id));
   document.getElementById("reviewList").innerHTML = rows.length ? rows.map((capture) => {
     const camera = capture.camera || {};
     const meta = camera.meta || {};
     const title = camera.channel_name || camera.device_serial || `相机 ${capture.camera_id}`;
+    const previewImage = capture.thumb_url || capture.image_url;
     const reasons = capture.reasons || [];
     const reason = reasons.join("；") || "AI 无法确定，请结合画面人工判断";
     const confidence = Number.isFinite(capture.confidence) ? capture.confidence.toFixed(2) : "-";
     const score = Math.max(4, Math.min(100, Number(capture.confidence || 0) * 100));
+    const storeContext = capture.store_context || {};
+    const storeCounts = storeContext.counts || {};
+    const peerChannels = (storeContext.channels || [])
+      .filter((channel) => channel.capture_id && channel.camera_id !== capture.camera_id)
+      .slice(0, 3);
+    const storeNavigationIds = [...new Set([
+      capture.id,
+      ...(storeContext.channels || []).map((channel) => channel.capture_id).filter(Boolean),
+    ])];
+    const storeIdsAttribute = escapeHtml(storeNavigationIds.join(","));
     const baseline = capture.baseline_url
       ? `<figure class="review-figure">
           <button class="review-image-button" type="button" data-open="${capture.id}" aria-label="查看 ${escapeHtml(title)} 的基准图">
@@ -1014,8 +1133,8 @@ function renderReviewCards(rows) {
         <div class="review-media ${baseline ? "has-baseline" : ""}">
           <figure class="review-figure">
             <button class="review-image-button" type="button" data-open="${capture.id}" aria-label="查看 ${escapeHtml(title)} 的当前抓图">
-              ${capture.image_url
-                ? `<img src="${escapeHtml(capture.image_url)}" alt="${escapeHtml(title)} 当前抓图" loading="lazy" />`
+              ${previewImage
+                ? `<img src="${escapeHtml(previewImage)}" alt="${escapeHtml(title)} 当前抓图" loading="lazy" />`
                 : `<span class="review-image-empty">当前抓图不可用</span>`}
             </button>
             <figcaption>AI 当前画面</figcaption>
@@ -1036,15 +1155,27 @@ function renderReviewCards(rows) {
             </div>
           </div>
           <p class="review-reason">${escapeHtml(reason)}</p>
+          <div class="review-store-snapshot">
+            <div class="review-store-snapshot-head">
+              <span>同门店参考</span>
+              <b>${storeContext.total || 1} 个通道 · 合格 ${storeCounts.pass || 0} / 不合格 ${storeCounts.fail || 0}</b>
+            </div>
+            ${peerChannels.length ? `<div class="review-store-thumbs">${peerChannels.map((channel) => `
+              <button type="button" data-open="${channel.capture_id}" data-nav-scope="store" data-store-ids="${storeIdsAttribute}" title="${escapeHtml(channel.channel_name)} · ${labelMap[channel.decision] || channel.decision}">
+                ${channel.thumb_url ? `<img src="${escapeHtml(channel.thumb_url)}" alt="${escapeHtml(channel.channel_name)}" loading="lazy" />` : `<i>${channel.decision === "no_signal" ? "本次抓图失败" : "无画面"}</i>`}
+                <span class="pill ${escapeHtml(channel.decision)}">${labelMap[channel.decision] || channel.decision}</span>
+              </button>`).join("")}</div>` : '<p>同店没有其他可参考抓图</p>'}
+          </div>
           <div class="review-meta">
             <span><small>设备序列号</small><b>${escapeHtml(camera.device_serial || "-")}</b></span>
             <span><small>通道</small><b>CH ${escapeHtml(camera.channel_no ?? "-")}</b></span>
             <span><small>抓图时间</small><b>${fmtRelativeTime(capture.capture_time)}</b></span>
           </div>
-          <div class="review-actions">
-            <button class="btn good" type="button" data-review="${capture.id}" data-decision="pass">标为合格</button>
-            <button class="btn bad" type="button" data-review="${capture.id}" data-decision="fail">标为不合格</button>
-          </div>
+          ${hasPermission("review.write") ? `
+            <div class="review-actions">
+              <button class="btn good" type="button" data-review="${capture.id}" data-decision="pass">标为合格</button>
+              <button class="btn bad" type="button" data-review="${capture.id}" data-decision="fail">标为不合格</button>
+            </div>` : '<p class="review-readonly">当前账号只有查看权限</p>'}
         </div>
       </article>`;
   }).join("") : `
@@ -1087,15 +1218,27 @@ function visibleCaseIds(containerId) {
 function updateDetailNavigationState() {
   const total = state.detailIds.length;
   const index = state.detailIndex;
+  const isReview = state.detailQueueKind === "review";
+  const isStoreQueue = state.detailQueueKind === "store";
+  const queueLabel = isReview ? "复核" : isStoreQueue ? "同店通道" : "抓图";
   const position = document.getElementById("detailNavPosition");
   const hint = document.getElementById("detailNavHint");
   const previous = document.getElementById("detailPrev");
   const next = document.getElementById("detailNext");
-  if (position) position.textContent = total ? `第 ${index + 1} / ${total} 条` : "0 条";
+  const previousText = document.getElementById("detailPrevText");
+  const nextText = document.getElementById("detailNextText");
+  if (previousText) previousText.textContent = isReview ? "上一条复核" : isStoreQueue ? "上一路通道" : "上一条抓图";
+  if (nextText) nextText.textContent = isReview ? "下一条复核" : isStoreQueue ? "下一路通道" : "下一条抓图";
+  if (position) position.textContent = total ? `${queueLabel} ${index + 1} / ${total}` : "0 条";
   if (hint) {
-    hint.textContent = total > 1
-      ? `正在按当前筛选结果浏览第 ${index + 1} 条抓图，键盘 ← → 也可以切换。`
-      : "当前列表只有一条抓图，切换筛选后可以连续查看其他记录。";
+    const prefix = state.detailContextLabel ? `${state.detailContextLabel} · ` : "";
+    if (state.detailMode === "store" && state.detailIds.length) {
+      hint.textContent = `同店通道浏览中；键盘 ← → 将继续浏览${queueLabel}队列。`;
+    } else {
+      hint.textContent = total > 1
+        ? `${prefix}${queueLabel}队列第 ${index + 1} / ${total} 条，键盘 ← → 也可以切换。`
+        : `${prefix}当前${queueLabel}队列只有一条抓图。`;
+    }
   }
   if (previous) previous.disabled = !total || index <= 0;
   if (next) next.disabled = !total || index >= total - 1;
@@ -1106,24 +1249,54 @@ async function navigateDetail(delta) {
   if (nextIndex < 0 || nextIndex >= state.detailIds.length) return;
   const ids = [...state.detailIds];
   try {
-    await openDetail(ids[nextIndex], ids);
+    await openDetail(ids[nextIndex], ids, state.detailQueueKind);
   } catch (err) {
     toast(`案例加载失败：${err.message}`);
     updateDetailNavigationState();
   }
 }
 
-async function openDetail(id, navigationIds = null) {
-  const candidateIds = Array.isArray(navigationIds)
-    ? [...new Set(navigationIds.map(Number).filter(Number.isInteger))]
-    : [...state.detailIds];
-  state.detailIds = candidateIds.includes(id) ? candidateIds : [id];
-  state.detailIndex = state.detailIds.indexOf(id);
+async function openDetail(id, navigationIds = null, source = "capture") {
+  state.detailCurrentId = Number(id);
+  if (source === "store" && state.detailIds.length) {
+    state.detailMode = "store";
+  } else {
+    const candidateIds = Array.isArray(navigationIds)
+      ? [...new Set(navigationIds.map(Number).filter(Number.isInteger))]
+      : [...state.detailIds];
+    state.detailIds = candidateIds.includes(id) ? candidateIds : [id];
+    state.detailIndex = state.detailIds.indexOf(id);
+    state.detailMode = "queue";
+    state.detailQueueKind = source;
+  }
   updateDetailNavigationState();
   const requestId = ++state.detailRequestId;
   const detail = await api(`/api/captures/${id}`);
   if (requestId !== state.detailRequestId) return;
-  document.getElementById("detailImage").src = detail.image_url;
+  const detailCamera = detail.camera || {};
+  const detailMeta = detailCamera.meta || {};
+  const detailCameraName = detailCamera.channel_name || detailCamera.device_serial || `相机 ${detail.camera_id}`;
+  const detailStoreName = detailMeta.store_name || "未标注门店";
+  state.detailContextLabel = `${detailStoreName} · ${detailCameraName}`;
+  document.getElementById("detailCurrentCaption").textContent =
+    state.detailMode === "store" ? `${detailCameraName} · ${detailStoreName}` : "当前画面";
+  const detailImage = document.getElementById("detailImage");
+  const imageEmpty = document.getElementById("detailImageEmpty");
+  const imageEmptyReason = document.getElementById("detailImageEmptyReason");
+  detailImage.hidden = !detail.image_url;
+  imageEmpty.hidden = Boolean(detail.image_url);
+  imageEmptyReason.textContent =
+    (detail.reasons || [])[0] || "设备抓图失败，请结合判定原因和门店其他通道判断。";
+  detailImage.onload = () => {
+    detailImage.hidden = false;
+    imageEmpty.hidden = true;
+  };
+  detailImage.onerror = () => {
+    detailImage.hidden = true;
+    imageEmpty.hidden = false;
+  };
+  if (detail.image_url) detailImage.src = detail.image_url;
+  else detailImage.removeAttribute("src");
   document.getElementById("detailBaseline").src = detail.baseline_url || EMPTY_IMG;
   document.getElementById("detailBaseline").closest("figure").hidden = !detail.baseline_url;
   document.querySelector("#detailModal .compare").style.gridTemplateColumns = detail.baseline_url ? "" : "1fr";
@@ -1153,19 +1326,100 @@ async function openDetail(id, navigationIds = null) {
     ${renderBlur(detail.module_results && detail.module_results.blur)}
     ${renderSemantic(detail.module_results && detail.module_results.semantic, detail.module_results && detail.module_results.element_match)}
     <details class="raw-metrics"><summary>查看全部图像指标</summary><p>${Object.entries(detail.metrics || {}).map(([k, v]) => `${escapeHtml(k)}=${escapeHtml(typeof v === "object" ? JSON.stringify(v) : v)}`).join("， ")}</p></details>
-    <div class="actions">
+    ${hasPermission("review.write") && state.detailQueueKind === "review" ? `<div class="actions">
       <button class="btn good" data-review="${detail.id}" data-decision="pass">复核合格</button>
       <button class="btn bad" data-review="${detail.id}" data-decision="fail">复核不合格</button>
-    </div>`;
+    </div>` : state.detailQueueKind === "review"
+      ? '<p class="review-readonly">当前账号没有人工复核权限</p>'
+      : '<p class="review-readonly">当前从抓图记录查看，仅供查看；人工复核请从“人工复核”页面进入。</p>'}`;
   document.getElementById("detailModal").classList.remove("hidden");
   document.querySelector("#detailModal .modal-content").scrollTop = 0;
   updateDetailNavigationState();
+  loadDetailStoreContext(detail);
   document.querySelectorAll("#detailInfo button[data-review]").forEach((b) => {
     b.addEventListener("click", async () => {
       const ok = await submitReview(Number(b.dataset.review), b.dataset.decision, b.dataset.baseline === "1");
       if (ok) document.getElementById("detailModal").classList.add("hidden");
     });
   });
+}
+
+function updateDetailStoreNavigation() {
+  const total = state.detailStoreIds.length;
+  const index = state.detailStoreIds.indexOf(state.detailCurrentId);
+  const position = document.getElementById("detailStorePosition");
+  const previous = document.getElementById("detailStorePrev");
+  const next = document.getElementById("detailStoreNext");
+  if (position) position.textContent = total && index >= 0 ? `${index + 1} / ${total}` : "0 / 0";
+  if (previous) previous.disabled = !total || index <= 0;
+  if (next) next.disabled = !total || index < 0 || index >= total - 1;
+}
+
+async function navigateDetailStore(delta) {
+  const nextIndex = state.detailStoreIds.indexOf(state.detailCurrentId) + delta;
+  if (nextIndex < 0 || nextIndex >= state.detailStoreIds.length) return;
+  try {
+    await openDetail(state.detailStoreIds[nextIndex], state.detailStoreIds, "store");
+  } catch (err) {
+    toast(`同店通道加载失败：${err.message}`);
+    updateDetailStoreNavigation();
+  }
+}
+
+async function loadDetailStoreContext(detail) {
+  const requestId = state.detailRequestId;
+  const container = document.getElementById("detailStoreContext");
+  const list = document.getElementById("detailStoreContextList");
+  const meta = detail.camera?.meta || {};
+  const storeName = meta.store_name || "未标注门店";
+  const storeNo = meta.store_no || "";
+  if (!meta.store_name && !meta.store_no) {
+    container.hidden = true;
+    return;
+  }
+  container.hidden = false;
+  document.getElementById("detailStoreContextMeta").textContent = `${storeName} · 正在读取其他通道…`;
+  list.innerHTML = loadingCards(2);
+  try {
+    const params = withBatch(new URLSearchParams({
+      status: "active",
+      limit: "100",
+      query: storeNo || storeName,
+    }));
+    const data = await api(`/api/cameras?${params.toString()}`);
+    if (requestId !== state.detailRequestId) return;
+    const storeCameras = (data.rows || []).filter((camera) => {
+      const peerMeta = camera.meta || {};
+      return storeNo ? String(peerMeta.store_no || "") === String(storeNo) : peerMeta.store_name === storeName;
+    });
+    const peers = storeCameras.filter((camera) => camera.id !== detail.camera_id);
+    state.detailStoreIds = [...new Set([
+      ...storeCameras.map((camera) => camera.last_capture?.id).filter(Boolean),
+      detail.id,
+    ])];
+    updateDetailStoreNavigation();
+    const passCount = peers.filter((camera) => storeCameraDecision(camera) === "pass").length;
+    const failCount = peers.filter((camera) => storeCameraDecision(camera) === "fail").length;
+    document.getElementById("detailStoreContextMeta").textContent =
+      `${storeName} · 其他 ${peers.length} 个通道 · 合格 ${passCount} / 不合格 ${failCount}`;
+    list.innerHTML = peers.length ? peers.map((camera) => {
+      const last = camera.last_capture;
+      const decision = storeCameraDecision(camera);
+      const title = camera.channel_name || camera.device_serial || `相机 ${camera.id}`;
+      return `
+        <article class="detail-store-peer" ${last ? `data-open="${last.id}" role="button" tabindex="0"` : ""}>
+          ${last?.thumb_url ? `<img src="${escapeHtml(last.thumb_url)}" alt="${escapeHtml(title)}" loading="lazy" />` : `<div class="detail-store-peer-empty">${decision === "no_signal" ? "本次抓图失败" : "无画面"}</div>`}
+          <div class="detail-store-peer-copy">
+            <b>${escapeHtml(title)}</b>
+            <span>${pill(decision)} · ${escapeHtml(camera.device_serial || "-")} · CH ${escapeHtml(camera.channel_no ?? "-")}</span>
+          </div>
+        </article>`;
+    }).join("") : '<div class="report-empty">该门店没有其他通道</div>';
+  } catch (err) {
+    if (requestId !== state.detailRequestId) return;
+    document.getElementById("detailStoreContextMeta").textContent = "同门店通道加载失败";
+    list.innerHTML = `<p class="occlusion-note">${escapeHtml(err.message)}</p>`;
+  }
 }
 
 function storeCameraDecision(camera) {
@@ -1229,6 +1483,10 @@ function renderStoreCameraList() {
 }
 
 async function openStoreModal(storeQuery, storeName, storeNo = "") {
+  state.detailIds = [];
+  state.detailIndex = -1;
+  state.detailStoreIds = [];
+  state.detailQueueKind = "store";
   state.storeName = storeName || "未标注门店";
   state.storeFilter = "";
   state.storeRows = [];
@@ -1273,6 +1531,154 @@ async function openStoreModal(storeQuery, storeName, storeNo = "") {
   }
 }
 
+function destroyReportCharts() {
+  state.reportCharts.forEach((chart) => {
+    try { chart.destroy(); } catch (err) { /* ignore */ }
+  });
+  state.reportCharts = [];
+}
+
+function reportChart(canvasId, config) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas || !window.Chart) return null;
+  const chart = new Chart(canvas, config);
+  state.reportCharts.push(chart);
+  return chart;
+}
+
+async function loadReport() {
+  const batchId = state.batchAll ? state.batches[0]?.id : state.batchId;
+  const summary = document.getElementById("reportSummary");
+  const stores = document.getElementById("reportStoreTable");
+  const reasons = document.getElementById("reportReasons");
+  destroyReportCharts();
+  if (!batchId) {
+    summary.innerHTML = '<div class="report-empty">暂无巡检批次</div>';
+    stores.innerHTML = '<div class="report-empty">暂无门店数据</div>';
+    reasons.innerHTML = '<div class="report-empty">暂无异常原因</div>';
+    return;
+  }
+  document.getElementById("reportScopeLabel").textContent = `批次 #${batchId}`;
+  summary.innerHTML = '<div class="report-empty">正在生成巡检报告…</div>';
+  stores.innerHTML = "";
+  reasons.innerHTML = "";
+  try {
+    const report = await api(`/api/reports/${batchId}`);
+    const by = report.by_decision || {};
+    summary.innerHTML = `
+      <div class="report-summary-card"><span>检查通道</span><strong>${report.summary.total}</strong><small>已生成判定结果</small></div>
+      <div class="report-summary-card pass"><span>合格</span><strong>${by.pass || 0}</strong><small>通过率 ${report.summary.pass_rate}%</small></div>
+      <div class="report-summary-card fail"><span>不合格</span><strong>${by.fail || 0}</strong><small>需要处理</small></div>
+      <div class="report-summary-card review"><span>待复核</span><strong>${by.review || 0}</strong><small>人工确认</small></div>
+      <div class="report-summary-card"><span>已人工复核</span><strong>${report.summary.reviewed}</strong><small>平均置信度 ${report.summary.average_confidence}</small></div>`;
+    const storeRows = report.stores || [];
+    stores.innerHTML = storeRows.length ? `
+      <table class="report-table">
+        <thead><tr><th>门店</th><th>通道</th><th>合格</th><th>不合格</th><th>待复核</th><th>无信号</th><th>合格率</th></tr></thead>
+        <tbody>${storeRows.map((store) => `
+          <tr>
+            <td>${escapeHtml(store.store_name)}</td>
+            <td>${store.total}</td>
+            <td>${store.pass_count}</td>
+            <td class="${store.fail_count ? "danger-value" : ""}">${store.fail_count}</td>
+            <td>${store.review_count}</td>
+            <td>${store.no_signal_count}</td>
+            <td>${store.pass_rate}%</td>
+          </tr>`).join("")}</tbody>
+      </table>` : '<div class="report-empty">当前批次没有门店数据</div>';
+    const topReasons = report.top_reasons || [];
+    reasons.innerHTML = topReasons.length ? topReasons.map((item) => `
+      <div class="report-reason-item"><span>${escapeHtml(item.reason)}</span><b>${item.count}</b></div>`).join("")
+      : '<div class="report-empty">没有异常原因记录</div>';
+    reportChart("reportDecisionChart", {
+      type: "doughnut",
+      data: {
+        labels: ["合格", "不合格", "待复核", "无信号"],
+        datasets: [{ data: [by.pass || 0, by.fail || 0, by.review || 0, by.no_signal || 0], backgroundColor: ["#22b883", "#f2556f", "#e7a936", "#8493a8"] }],
+      },
+      options: { maintainAspectRatio: false, plugins: { legend: { position: "bottom", labels: { color: "#9cafc7", font: { size: 9 } } } } },
+    });
+    const riskStores = [...storeRows]
+      .sort((a, b) => (b.fail_count + b.review_count) - (a.fail_count + a.review_count))
+      .slice(0, 10);
+    reportChart("reportStoreChart", {
+      type: "bar",
+      data: {
+        labels: riskStores.map((store) => store.store_name),
+        datasets: [
+          { label: "不合格", data: riskStores.map((store) => store.fail_count), backgroundColor: "#f2556f", borderRadius: 4 },
+          { label: "待复核", data: riskStores.map((store) => store.review_count), backgroundColor: "#e7a936", borderRadius: 4 },
+        ],
+      },
+      options: {
+        maintainAspectRatio: false,
+        indexAxis: "y",
+        scales: {
+          x: { stacked: true, ticks: { color: "#768ba6" }, grid: { color: "rgba(150,175,215,.08)" } },
+          y: { stacked: true, ticks: { color: "#9cafc7", font: { size: 8 } }, grid: { display: false } },
+        },
+        plugins: { legend: { position: "bottom", labels: { color: "#9cafc7", font: { size: 9 } } } },
+      },
+    });
+  } catch (err) {
+    summary.innerHTML = `<div class="report-empty">报告加载失败：${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function permissionLabels(permissions) {
+  const labels = {
+    "users.manage": "用户管理",
+    "settings.write": "修改配置",
+    "cycle.control": "运行控制",
+    "review.write": "人工复核",
+    "maintenance.run": "维护操作",
+  };
+  return (permissions || []).map((item) => labels[item] || item);
+}
+
+function setUserPermissionInputs(permissions) {
+  const mapping = {
+    permUsers: "users.manage",
+    permSettings: "settings.write",
+    permCycle: "cycle.control",
+    permReview: "review.write",
+    permMaintenance: "maintenance.run",
+  };
+  const adminRole = document.getElementById("userRole").value === "admin";
+  Object.entries(mapping).forEach(([id, permission]) => {
+    const input = document.getElementById(id);
+    input.disabled = adminRole;
+    input.checked = adminRole || (permissions || []).includes(permission);
+  });
+}
+
+async function loadUsersPage() {
+  const data = await api("/api/users");
+  state.authMeta = { ...(state.authMeta || {}), ...data };
+  state.userRows = data.rows || [];
+  const labels = data.role_labels || {};
+  document.getElementById("userList").innerHTML = (data.rows || []).map((user) => `
+    <article class="user-row ${user.status === "disabled" ? "user-status-disabled" : ""}" data-user-id="${user.id}">
+      <div class="user-row-main"><b>${escapeHtml(user.display_name)}</b><small>${escapeHtml(user.username)} · ${user.status === "active" ? "启用" : "已停用"}</small></div>
+      <span class="user-role">${escapeHtml(labels[user.role] || user.role)}</span>
+      <span class="user-permissions">${escapeHtml(permissionLabels(user.permissions).join(" · ") || "只读")}</span>
+      <div class="user-row-actions">
+        <button type="button" data-edit-user="${user.id}">编辑</button>
+        <button type="button" data-toggle-user="${user.id}" data-status="${user.status}">${user.status === "active" ? "停用" : "启用"}</button>
+      </div>
+    </article>`).join("");
+}
+
+function resetUserEditor() {
+  state.editingUserId = null;
+  document.getElementById("userEditorForm").reset();
+  document.getElementById("userUsername").disabled = false;
+  document.getElementById("userEditorTitle").textContent = "新建用户";
+  document.getElementById("userPasswordLabel").textContent = "初始密码";
+  document.getElementById("saveUser").textContent = "创建用户";
+  document.getElementById("cancelUserEdit").hidden = true;
+  setUserPermissionInputs(["review.write"]);
+}
 function settingsFormSnapshot() {
   const snapshot = {};
   document.querySelectorAll("#page-settings input[id], #page-settings textarea[id]").forEach((input) => {
@@ -1396,6 +1802,7 @@ async function loadSettings() {
   document.getElementById("settingPromptSystem").value = s.vlm_prompts?.system || "";
   document.getElementById("settingPromptUser").value = s.vlm_prompts?.user || "";
   const seedDemo = document.getElementById("seedDemo");
+  seedDemo.dataset.demoAllowed = String(s.demo_mode);
   seedDemo.disabled = !s.demo_mode;
   document.getElementById("seedDemoAvailability").textContent = s.demo_mode
     ? "当前处于演示环境，可以重新生成演示批次和图片。"
@@ -1404,6 +1811,7 @@ async function loadSettings() {
   refreshPromptCounts();
   state.settingsSnapshot = settingsFormSnapshot();
   setSettingsDirty(false);
+  applyUserPermissions(state.currentUser);
 }
 
 function updatePipelineModeUI() {
@@ -1530,9 +1938,68 @@ async function saveSettingsNow(trigger) {
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
+  document.getElementById("loginForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const error = document.getElementById("authError");
+    error.hidden = true;
+    try {
+      await authRequest("/api/auth/login", {
+        username: document.getElementById("loginUsername").value,
+        password: document.getElementById("loginPassword").value,
+      });
+      window.location.reload();
+    } catch (err) {
+      error.textContent = err.message;
+      error.hidden = false;
+    }
+  });
+  document.getElementById("setupForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const error = document.getElementById("authError");
+    error.hidden = true;
+    const password = document.getElementById("setupPassword").value;
+    if (password !== document.getElementById("setupPasswordConfirm").value) {
+      error.textContent = "两次输入的密码不一致";
+      error.hidden = false;
+      return;
+    }
+    try {
+      await authRequest("/api/auth/setup", {
+        username: document.getElementById("setupUsername").value,
+        display_name: document.getElementById("setupDisplayName").value,
+        password,
+      });
+      window.location.reload();
+    } catch (err) {
+      error.textContent = err.message;
+      error.hidden = false;
+    }
+  });
+  document.getElementById("logoutButton").addEventListener("click", async () => {
+    try { await authRequest("/api/auth/logout"); } catch (err) { /* ignore */ }
+    window.location.reload();
+  });
+
+  let authenticated = false;
+  try {
+    authenticated = await initializeAuthentication();
+  } catch (err) {
+    showAuthScreen({ setup_required: false, authenticated: false });
+    const error = document.getElementById("authError");
+    error.textContent = `无法连接登录服务：${err.message}`;
+    error.hidden = false;
+  }
+  if (!authenticated) return;
+
+  resetUserEditor();
   Object.keys(state.views).forEach(applyView);
   document.querySelectorAll(".side-nav button[data-page]").forEach((b) => {
-    b.addEventListener("click", () => switchPage(b.dataset.page));
+    b.addEventListener("click", () => {
+      if (b.dataset.page === "captures") {
+        document.getElementById("captureFilter").value = "";
+      }
+      switchPage(b.dataset.page);
+    });
   });
   document.querySelectorAll(".view-switch").forEach((switcher) => {
     switcher.addEventListener("click", (event) => {
@@ -1550,6 +2017,19 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   document.getElementById("detailPrev").addEventListener("click", () => navigateDetail(-1));
   document.getElementById("detailNext").addEventListener("click", () => navigateDetail(1));
+  document.getElementById("detailStorePrev").addEventListener("click", () => navigateDetailStore(-1));
+  document.getElementById("detailStoreNext").addEventListener("click", () => navigateDetailStore(1));
+  document.getElementById("detailStoreContextList").addEventListener("click", (event) => {
+    const peer = event.target.closest("[data-open]");
+    if (peer) openDetail(Number(peer.dataset.open), state.detailStoreIds, "store");
+  });
+  document.getElementById("detailStoreContextList").addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    const peer = event.target.closest("[data-open]");
+    if (!peer) return;
+    event.preventDefault();
+    openDetail(Number(peer.dataset.open), state.detailStoreIds, "store");
+  });
   document.getElementById("batchSelectButton").addEventListener("click", () => {
     const menu = document.getElementById("batchSelectMenu");
     setBatchMenuOpen(menu.hidden);
@@ -1679,14 +2159,14 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   document.getElementById("storeCameraList").addEventListener("click", (event) => {
     const row = event.target.closest(".store-camera-row[data-open]");
-    if (row) openDetail(Number(row.dataset.open), visibleCaseIds("storeCameraList"));
+    if (row) openDetail(Number(row.dataset.open), visibleCaseIds("storeCameraList"), "store");
   });
   document.getElementById("storeCameraList").addEventListener("keydown", (event) => {
     if (event.key !== "Enter" && event.key !== " ") return;
     const row = event.target.closest(".store-camera-row[data-open]");
     if (!row) return;
     event.preventDefault();
-    openDetail(Number(row.dataset.open), visibleCaseIds("storeCameraList"));
+    openDetail(Number(row.dataset.open), visibleCaseIds("storeCameraList"), "store");
   });
   document.getElementById("captureSearch").addEventListener("input", () => {
     debounceSearch("captures", () => loadCaptures(1));
@@ -1697,7 +2177,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   document.getElementById("captureGrid").addEventListener("click", (event) => {
     const trigger = event.target.closest("[data-open]");
-    if (trigger) openDetail(Number(trigger.dataset.open), visibleCaseIds("captureGrid"));
+    if (trigger) openDetail(Number(trigger.dataset.open), visibleCaseIds("captureGrid"), "capture");
   });
   document.getElementById("reviewList").addEventListener("click", async (event) => {
     const reviewButton = event.target.closest("[data-review]");
@@ -1713,7 +2193,16 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
     const detailButton = event.target.closest("[data-open]");
-    if (detailButton) openDetail(Number(detailButton.dataset.open), visibleCaseIds("reviewList"));
+    if (detailButton) {
+      const storeIds = detailButton.dataset.navScope === "store" && detailButton.dataset.storeIds
+        ? detailButton.dataset.storeIds.split(",").map(Number).filter(Number.isInteger)
+        : null;
+      openDetail(
+        Number(detailButton.dataset.open),
+        storeIds || state.reviewIds,
+        storeIds ? "store" : "review",
+      );
+    }
   });
   document.querySelector(".summary-strip").addEventListener("click", (event) => {
     const card = event.target.closest("[data-goto-page]");
@@ -1725,7 +2214,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
   document.getElementById("recentList").addEventListener("click", (event) => {
     const trigger = event.target.closest("[data-open]");
-    if (trigger) openDetail(Number(trigger.dataset.open), visibleCaseIds("recentList"));
+    if (trigger) openDetail(Number(trigger.dataset.open), visibleCaseIds("recentList"), "capture");
   });
   document.getElementById("viewAllCaptures").addEventListener("click", () => switchPage("captures"));
   document.getElementById("startCycle").addEventListener("click", async () => {
@@ -1749,6 +2238,121 @@ document.addEventListener("DOMContentLoaded", async () => {
       setStartCycleState("idle");
     }
   });
+  document.getElementById("pauseCycle").addEventListener("click", async () => {
+    try {
+      await api("/api/cycle/pause", { method: "POST" });
+      toast("巡检已暂停");
+      await loadDashboard();
+    } catch (err) {
+      toast(`暂停失败：${err.message}`);
+    }
+  });
+  document.getElementById("resumeCycle").addEventListener("click", async () => {
+    try {
+      await api("/api/cycle/resume", { method: "POST" });
+      toast("巡检已继续");
+      await loadDashboard();
+    } catch (err) {
+      toast(`继续失败：${err.message}`);
+    }
+  });
+  document.getElementById("stopCycle").addEventListener("click", async () => {
+    if (!confirm("停止后本轮未处理通道将不再继续，确认停止？")) return;
+    try {
+      await api("/api/cycle/stop", { method: "POST" });
+      toast("正在停止巡检");
+      await loadDashboard();
+    } catch (err) {
+      toast(`停止失败：${err.message}`);
+    }
+  });
+  document.getElementById("refreshReport").addEventListener("click", loadReport);
+  document.getElementById("userRole").addEventListener("change", (event) => {
+    const defaults = state.authMeta?.role_permissions?.[event.target.value] || [];
+    setUserPermissionInputs(defaults);
+  });
+  document.getElementById("userEditorForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const permissions = [
+      ["permUsers", "users.manage"],
+      ["permSettings", "settings.write"],
+      ["permCycle", "cycle.control"],
+      ["permReview", "review.write"],
+      ["permMaintenance", "maintenance.run"],
+    ].filter(([id]) => document.getElementById(id).checked).map(([, permission]) => permission);
+    const password = document.getElementById("userPassword").value;
+    try {
+      if (state.editingUserId === null) {
+        if (password.length < 8) {
+          toast("初始密码至少需要 8 个字符");
+          return;
+        }
+        await api("/api/users", {
+          method: "POST",
+          body: JSON.stringify({
+            username: document.getElementById("userUsername").value,
+            display_name: document.getElementById("userDisplayName").value,
+            password,
+            role: document.getElementById("userRole").value,
+            permissions,
+          }),
+        });
+        toast("用户已创建");
+      } else {
+        await api(`/api/users/${state.editingUserId}`, {
+          method: "PUT",
+          body: JSON.stringify({
+            display_name: document.getElementById("userDisplayName").value,
+            role: document.getElementById("userRole").value,
+            permissions,
+            password: password || null,
+          }),
+        });
+        toast("用户权限已更新");
+      }
+      resetUserEditor();
+      await loadUsersPage();
+    } catch (err) {
+      toast(`保存用户失败：${err.message}`);
+    }
+  });
+  document.getElementById("cancelUserEdit").addEventListener("click", resetUserEditor);
+  document.getElementById("userList").addEventListener("click", async (event) => {
+    const edit = event.target.closest("[data-edit-user]");
+    if (edit) {
+      const user = state.userRows.find((item) => item.id === Number(edit.dataset.editUser));
+      if (!user) return;
+      state.editingUserId = user.id;
+      document.getElementById("userUsername").value = user.username;
+      document.getElementById("userUsername").disabled = true;
+      document.getElementById("userDisplayName").value = user.display_name;
+      document.getElementById("userRole").value = user.role;
+      document.getElementById("userPassword").value = "";
+      document.getElementById("userPasswordLabel").textContent = "重置密码（留空则不修改）";
+      document.getElementById("userEditorTitle").textContent = "编辑用户";
+      document.getElementById("saveUser").textContent = "保存用户";
+      document.getElementById("cancelUserEdit").hidden = false;
+      setUserPermissionInputs(user.permissions);
+      return;
+    }
+    const toggle = event.target.closest("[data-toggle-user]");
+    if (!toggle) return;
+    const user = state.userRows.find((item) => item.id === Number(toggle.dataset.toggleUser));
+    if (!user) return;
+    const nextStatus = user.status === "active" ? "disabled" : "active";
+    if (!confirm(`${nextStatus === "disabled" ? "停用" : "启用"}用户 ${user.username}？`)) return;
+    try {
+      await api(`/api/users/${user.id}`, {
+        method: "PUT",
+        body: JSON.stringify({ status: nextStatus }),
+      });
+      toast(nextStatus === "disabled" ? "用户已停用" : "用户已启用");
+      await loadUsersPage();
+    } catch (err) {
+      toast(`操作失败：${err.message}`);
+    }
+  });
+
   document.getElementById("seedDemo").addEventListener("click", async () => {
     if (!confirm("重置演示数据会清空演示环境，确认继续？")) return;
     try {

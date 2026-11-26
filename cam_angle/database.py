@@ -21,6 +21,10 @@ class Database:
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(str(path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn.execute("PRAGMA busy_timeout=5000")
+        self._conn.execute("PRAGMA temp_store=MEMORY")
         self._init_schema()
 
     def _init_schema(self) -> None:
@@ -103,6 +107,38 @@ class Database:
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                    display_name TEXT DEFAULT '',
+                    password_hash TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'viewer',
+                    permissions TEXT NOT NULL DEFAULT '[]',
+                    status TEXT NOT NULL DEFAULT 'active',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    last_login_at TEXT DEFAULT ''
+                );
+
+                CREATE TABLE IF NOT EXISTS user_sessions (
+                    token_hash TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS audit_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    username TEXT DEFAULT '',
+                    action TEXT NOT NULL,
+                    target TEXT DEFAULT '',
+                    detail TEXT DEFAULT '',
+                    created_at TEXT NOT NULL
+                );
                 """
             )
             capture_columns = {
@@ -116,6 +152,20 @@ class Database:
             )
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_captures_camera_batch ON captures(camera_id, batch_id, id DESC)"
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sessions_user ON user_sessions(user_id, expires_at)"
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at DESC)"
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_cameras_store_no "
+                "ON cameras(json_extract(meta, '$.store_no'))"
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_cameras_store_name "
+                "ON cameras(json_extract(meta, '$.store_name'))"
             )
 
     # ---------- 通用 ----------
@@ -301,6 +351,48 @@ class Database:
             rows = self._conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
 
+    def get_store_context(
+        self, camera_id: int, batch_id: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        camera = self.get_camera(camera_id)
+        if not camera:
+            return []
+        meta = self._loads(camera.get("meta"), {})
+        store_no = str(meta.get("store_no") or "")
+        store_name = str(meta.get("store_name") or "")
+        if not store_no and not store_name:
+            return []
+        clauses = ["cam.status='active'"]
+        params: list = []
+        if store_no:
+            clauses.append("COALESCE(json_extract(cam.meta, '$.store_no'), '')=?")
+            params.append(store_no)
+        else:
+            clauses.append("COALESCE(json_extract(cam.meta, '$.store_name'), '')=?")
+            params.append(store_name)
+        capture_batch_clause = ""
+        capture_params: list = []
+        if batch_id is not None:
+            capture_batch_clause = " AND c.batch_id=?"
+            capture_params.append(batch_id)
+        sql = f"""
+            SELECT cam.id AS camera_id, cam.channel_name, cam.device_serial,
+                   cam.channel_no, cam.meta,
+                   c.id AS capture_id, c.decision, c.confidence, c.capture_time,
+                   c.thumb_path, c.path
+            FROM cameras cam
+            LEFT JOIN captures c ON c.id = (
+                SELECT c2.id FROM captures c2
+                WHERE c2.camera_id=cam.id{capture_batch_clause}
+                ORDER BY c2.id DESC LIMIT 1
+            )
+            WHERE {' AND '.join(clauses)}
+            ORDER BY cam.channel_no, cam.id
+        """
+        with self._lock:
+            rows = self._conn.execute(sql, capture_params + params).fetchall()
+        return [dict(row) for row in rows]
+
     # ---------- 基准图 ----------
     def add_baseline(
         self, camera_id: int, path: str, kind: str = "day", meta: Optional[Dict[str, Any]] = None
@@ -444,6 +536,40 @@ class Database:
             result.append(data)
         return result
 
+    def list_capture_summaries(
+        self,
+        decision: Optional[str] = None,
+        camera_id: Optional[int] = None,
+        batch_id: Optional[int] = None,
+        query: str = "",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """列表场景只取卡片需要的字段，避免传输大型模块结果。"""
+        where, params = self._capture_filters(
+            decision=decision,
+            camera_id=camera_id,
+            batch_id=batch_id,
+            query=query,
+        )
+        sql = (
+            "SELECT c.id, c.batch_id, c.camera_id, c.path, c.thumb_path, "
+            "c.source, c.quality, c.capture_time, c.decision, c.confidence, "
+            "c.reasons, c.baseline_id "
+            "FROM captures c "
+            "LEFT JOIN cameras cam ON cam.id=c.camera_id "
+            f"WHERE {where} ORDER BY c.id DESC LIMIT ? OFFSET ?"
+        )
+        params.extend([limit, offset])
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        result = []
+        for row in rows:
+            data = dict(row)
+            data["reasons"] = self._loads(data.get("reasons"), [])
+            result.append(data)
+        return result
+
     def _capture_filters(
         self,
         *,
@@ -554,3 +680,168 @@ class Database:
             "review_count": review_count,
             "by_decision": by_decision,
         }
+
+    # ---------- 用户、会话与审计 ----------
+    def count_users(self) -> int:
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()
+        return int(row["c"])
+
+    def create_user(
+        self,
+        username: str,
+        password_hash: str,
+        display_name: str,
+        role: str,
+        permissions: List[str],
+    ) -> int:
+        now = _now()
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                """
+                INSERT INTO users(
+                    username, display_name, password_hash, role, permissions,
+                    status, created_at, updated_at
+                ) VALUES(?,?,?,?,?,'active',?,?)
+                """,
+                (
+                    username,
+                    display_name,
+                    password_hash,
+                    role,
+                    self._json(permissions),
+                    now,
+                    now,
+                ),
+            )
+            return int(cur.lastrowid)
+
+    def _user_row(self, row: sqlite3.Row) -> Dict[str, Any]:
+        data = dict(row)
+        data["permissions"] = self._loads(data.get("permissions"), [])
+        return data
+
+    def get_user_by_username(self, username: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM users WHERE username=? COLLATE NOCASE",
+                (username,),
+            ).fetchone()
+        return self._user_row(row) if row else None
+
+    def get_user(self, user_id: int) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        return self._user_row(row) if row else None
+
+    def list_users(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM users ORDER BY id").fetchall()
+        return [self._user_row(row) for row in rows]
+
+    def update_user(
+        self,
+        user_id: int,
+        *,
+        display_name: Optional[str] = None,
+        role: Optional[str] = None,
+        permissions: Optional[List[str]] = None,
+        status: Optional[str] = None,
+        password_hash: Optional[str] = None,
+    ) -> None:
+        updates = []
+        params: list = []
+        for column, value in (
+            ("display_name", display_name),
+            ("role", role),
+            ("permissions", self._json(permissions) if permissions is not None else None),
+            ("status", status),
+            ("password_hash", password_hash),
+        ):
+            if value is not None:
+                updates.append(f"{column}=?")
+                params.append(value)
+        if not updates:
+            return
+        updates.append("updated_at=?")
+        params.extend([_now(), user_id])
+        with self._lock, self._conn:
+            self._conn.execute(
+                f"UPDATE users SET {', '.join(updates)} WHERE id=?",
+                params,
+            )
+
+    def touch_user_login(self, user_id: int) -> None:
+        now = _now()
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE users SET last_login_at=?, updated_at=? WHERE id=?",
+                (now, now, user_id),
+            )
+
+    def create_session(self, token_hash: str, user_id: int, expires_at: str) -> None:
+        now = _now()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO user_sessions(token_hash, user_id, created_at, expires_at, last_seen_at)
+                VALUES(?,?,?,?,?)
+                """,
+                (token_hash, user_id, now, expires_at, now),
+            )
+
+    def get_session_user(self, token_hash: str) -> Optional[Dict[str, Any]]:
+        now = _now()
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT u.* FROM user_sessions s
+                JOIN users u ON u.id=s.user_id
+                WHERE s.token_hash=? AND s.expires_at>? AND u.status='active'
+                """,
+                (token_hash, now),
+            ).fetchone()
+        return self._user_row(row) if row else None
+
+    def touch_session(self, token_hash: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE user_sessions SET last_seen_at=? WHERE token_hash=?",
+                (_now(), token_hash),
+            )
+
+    def revoke_session(self, token_hash: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM user_sessions WHERE token_hash=?", (token_hash,))
+
+    def revoke_user_sessions(self, user_id: int) -> None:
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM user_sessions WHERE user_id=?", (user_id,))
+
+    def cleanup_sessions(self) -> None:
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM user_sessions WHERE expires_at<=?", (_now(),))
+
+    def add_audit(
+        self,
+        user_id: Optional[int],
+        username: str,
+        action: str,
+        target: str = "",
+        detail: Any = "",
+    ) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO audit_logs(user_id, username, action, target, detail, created_at)
+                VALUES(?,?,?,?,?,?)
+                """,
+                (
+                    user_id,
+                    username,
+                    action,
+                    target,
+                    self._json(detail) if not isinstance(detail, str) else detail,
+                    _now(),
+                ),
+            )

@@ -136,6 +136,22 @@ python run.py
 
 `run.py` 在 20350–20399 自动选择空闲端口，以终端打印的访问地址为准。也可使用已有 `start.ps1` 或 `start.bat`。默认演示模式提供合成相机图片，分析与入库走同一流程。
 
+### 首次登录与用户权限
+
+首次打开系统且数据库中还没有用户时，页面会进入管理员初始化界面。创建第一个管理员后，该入口自动关闭。
+
+管理员可在“用户与权限”页面创建账号，并按账号配置以下权限：
+
+- `users.manage`：创建、编辑、停用和重置用户账号
+- `settings.write`：修改运行配置和 Prompt
+- `cycle.control`：开始、暂停、继续和停止巡检
+- `review.write`：提交人工复核结论
+- `maintenance.run`：执行演示数据维护等操作
+
+登录使用 HttpOnly 会话 Cookie，密码使用 PBKDF2-SHA256 加盐存储。复核、配置修改、巡检控制和用户管理操作会写入审计日志。
+
+巡检运行期间支持暂停、继续和停止。停止后已完成的抓图会保留，正在执行的单个模型请求会在当前阶段结束后退出。巡检完成后会在批次产物目录生成 `report.json`，网页“巡检报告”页面会生成判定分布、门店风险和异常原因图表。
+
 接入真实海康云眸时，在 `.env` 中配置（示例值不是实际凭证）：
 
 ```env
@@ -164,6 +180,8 @@ cam_angle/
   hikvision.py   海康云眸开放平台客户端
   database.py    SQLite 存储
   config.py      配置、阈值校验与恢复
+  auth.py        密码、会话与权限模型
+  report.py      批次报告聚合
   demo.py        合成演示图
 static/          原生 HTML / JavaScript / CSS
  tests/          图像检测、完整巡检和接口回归测试
@@ -175,7 +193,13 @@ SQLite 存相机、抓帧批次、抓图、模块结果、复核和设置。每�
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
+| POST | `/api/auth/setup` | 首次创建管理员，仅无用户时可用 |
+| POST | `/api/auth/login` | 账号登录并建立会话 |
+| POST | `/api/auth/logout` | 退出登录 |
+| GET | `/api/auth/me` | 当前用户及权限 |
+| GET/POST/PUT | `/api/users` | 用户列表、创建与权限修改 |
 | GET | `/api/batches` | 抓帧批次列表及批次结果统计 |
+| GET | `/api/reports/{batch_id}` | 批次汇总、门店风险、异常原因和时间线报告 |
 | GET | `/api/stats` | 当前或指定批次的统计 |
 | GET | `/api/cameras` | 相机分页列表，支持批次、判定和关键词筛选 |
 | GET | `/api/captures` | 抓图分页记录，支持批次、判定和关键词筛选 |
@@ -185,6 +209,9 @@ SQLite 存相机、抓帧批次、抓图、模块结果、复核和设置。每�
 | GET | `/api/captures/{id}/occlusion` | 透明红色标注 PNG；旧记录或文件缺失返回 404 |
 | POST | `/api/captures/{id}/review` | 人工复核 |
 | POST | `/api/cycle/start` | 开始一轮巡检 |
+| POST | `/api/cycle/pause` | 暂停巡检调度 |
+| POST | `/api/cycle/resume` | 继续暂停的巡检 |
+| POST | `/api/cycle/stop` | 停止本轮巡检并保留已有产物 |
 | GET | `/api/cycle/progress` | 巡检进度、速度与预计剩余时间 |
 | GET/PUT | `/api/settings` | 读取或保存判定阈值 |
 | GET | `/api/health` | 健康检查 |

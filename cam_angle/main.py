@@ -3,15 +3,30 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import re
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from .auth import (
+    PERMISSIONS,
+    ROLE_LABELS,
+    ROLE_PERMISSIONS,
+    hash_password,
+    hash_session_token,
+    has_permission,
+    issue_session_token,
+    normalize_permissions,
+    public_user,
+    session_expiry,
+    verify_password,
+)
 from .config import (
     get_config,
     restore_module_switches,
@@ -23,6 +38,7 @@ from .config import (
 from .database import Database
 from .demo import seed_demo
 from .pipeline import Pipeline
+from .report import build_batch_report
 from .vlm import DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT
 
 
@@ -31,6 +47,41 @@ db = Database(config.db_path)
 pipeline = Pipeline(config, db)
 
 app = FastAPI(title="CamAngle 摄像头角度巡检", version="0.1.0")
+
+AUTH_COOKIE_NAME = "camangle_session"
+PUBLIC_API_PATHS = {
+    "/api/health",
+    "/api/auth/status",
+    "/api/auth/login",
+    "/api/auth/setup",
+}
+
+
+def _session_user_from_request(request: Request) -> Optional[Dict[str, Any]]:
+    token = request.cookies.get(AUTH_COOKIE_NAME, "")
+    if not token:
+        return None
+    return db.get_session_user(hash_session_token(token))
+
+
+def _require_permission(request: Request, permission: str) -> Dict[str, Any]:
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="请先登录")
+    if not has_permission(user, permission):
+        raise HTTPException(status_code=403, detail="当前账号没有执行此操作的权限")
+    return user
+
+
+@app.middleware("http")
+async def authenticate_api(request: Request, call_next):
+    path = request.url.path
+    if path.startswith("/api/") and path not in PUBLIC_API_PATHS:
+        user = _session_user_from_request(request)
+        if not user:
+            return JSONResponse(status_code=401, content={"detail": "登录已失效，请重新登录"})
+        request.state.user = user
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -48,6 +99,7 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 @app.on_event("startup")
 async def startup() -> None:
     config.ensure_dirs()
+    db.cleanup_sessions()
     config.thresholds = restore_thresholds(config.thresholds, db.get_setting("thresholds", {}))
     config.module_switches = restore_module_switches(
         db.get_setting("module_switches", {})
@@ -119,7 +171,7 @@ async def startup() -> None:
     db.set_cycle("finished_at", "")
     db.set_cycle("error", "")
     latest_batch = db.get_latest_batch()
-    if latest_batch and latest_batch.get("state") == "running":
+    if latest_batch and latest_batch.get("state") in {"running", "paused", "stopping"}:
         interrupted_at = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
         db.update_batch(
             latest_batch["id"],
@@ -152,6 +204,38 @@ class SettingsPayload(BaseModel):
     capture_concurrency: Optional[Any] = None
     inference_concurrency: Optional[Any] = None
     sample_size: Optional[Any] = None
+
+
+class LoginPayload(BaseModel):
+    username: str
+    password: str
+
+
+class SetupPayload(BaseModel):
+    username: str
+    display_name: str = ""
+    password: str
+
+
+class UserCreatePayload(BaseModel):
+    username: str
+    display_name: str = ""
+    password: str
+    role: str = "reviewer"
+    permissions: Optional[List[str]] = None
+
+
+class UserUpdatePayload(BaseModel):
+    display_name: Optional[str] = None
+    role: Optional[str] = None
+    permissions: Optional[List[str]] = None
+    status: Optional[str] = None
+    password: Optional[str] = None
+
+
+class PasswordChangePayload(BaseModel):
+    current_password: str
+    new_password: str
 
 
 def _camera_brief(camera: Dict[str, Any]) -> Dict[str, Any]:
@@ -195,6 +279,39 @@ def _capture_urls(capture: Dict[str, Any]) -> Dict[str, str]:
     }
 
 
+def _store_context_for_camera(
+    camera: Dict[str, Any],
+    batch_id: Optional[int],
+    cache: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    meta = camera.get("meta") or {}
+    key = f"{meta.get('store_no') or ''}|{meta.get('store_name') or ''}"
+    if key in cache:
+        return cache[key]
+    rows = db.get_store_context(camera["id"], batch_id)
+    channels = []
+    counts = {"pass": 0, "fail": 0, "review": 0, "no_signal": 0, "pending": 0}
+    for row in rows:
+        decision = row.get("decision") or "pending"
+        counts[decision] = counts.get(decision, 0) + 1
+        capture_id = row.get("capture_id")
+        channels.append({
+            "camera_id": row["camera_id"],
+            "capture_id": capture_id,
+            "channel_name": row.get("channel_name") or row.get("device_serial") or "",
+            "channel_no": row.get("channel_no"),
+            "decision": decision,
+            "confidence": row.get("confidence") or 0.0,
+            "capture_time": row.get("capture_time") or "",
+            "thumb_url": f"/api/captures/{capture_id}/thumb"
+            if capture_id and row.get("thumb_path")
+            else "",
+        })
+    result = {"total": len(channels), "counts": counts, "channels": channels}
+    cache[key] = result
+    return result
+
+
 @app.get("/")
 async def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
@@ -211,6 +328,239 @@ async def health() -> Dict[str, Any]:
         "pipeline_mode": config.pipeline_mode,
         "module_switches": dict(config.module_switches),
     }
+
+
+def _validate_username(username: str) -> str:
+    value = username.strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{3,32}", value):
+        raise HTTPException(
+            status_code=400,
+            detail="用户名需为 3–32 位字母、数字、点、下划线或短横线",
+        )
+    return value
+
+
+def _set_auth_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=AUTH_COOKIE_NAME,
+        value=token,
+        max_age=max(1, config.auth_session_hours) * 3600,
+        httponly=True,
+        secure=config.auth_cookie_secure,
+        samesite="lax",
+        path="/",
+    )
+
+
+def _start_user_session(
+    response: Response, user: Dict[str, Any], request: Optional[Request] = None
+) -> Dict[str, Any]:
+    token, token_hash = issue_session_token()
+    db.create_session(
+        token_hash,
+        user["id"],
+        session_expiry(config.auth_session_hours),
+    )
+    db.touch_user_login(user["id"])
+    _set_auth_cookie(response, token)
+    db.add_audit(
+        user["id"],
+        user["username"],
+        "auth.login",
+        detail={"ip": request.client.host if request and request.client else ""},
+    )
+    refreshed = db.get_user(user["id"]) or user
+    return public_user(refreshed)
+
+
+@app.get("/api/auth/status")
+async def auth_status(request: Request) -> Dict[str, Any]:
+    setup_required = db.count_users() == 0
+    user = None if setup_required else _session_user_from_request(request)
+    return {
+        "setup_required": setup_required,
+        "authenticated": user is not None,
+        "user": public_user(user) if user else None,
+        "permissions": list(PERMISSIONS),
+        "role_permissions": ROLE_PERMISSIONS,
+        "role_labels": ROLE_LABELS,
+    }
+
+
+@app.post("/api/auth/setup")
+async def auth_setup(payload: SetupPayload, request: Request, response: Response) -> Dict[str, Any]:
+    if db.count_users() > 0:
+        raise HTTPException(status_code=409, detail="系统管理员已经初始化")
+    username = _validate_username(payload.username)
+    user_id = db.create_user(
+        username=username,
+        password_hash=hash_password(payload.password),
+        display_name=payload.display_name.strip() or username,
+        role="admin",
+        permissions=normalize_permissions("admin"),
+    )
+    user = db.get_user(user_id)
+    assert user is not None
+    started = _start_user_session(response, user, request)
+    return {"ok": True, "user": started}
+
+
+@app.post("/api/auth/login")
+async def auth_login(payload: LoginPayload, request: Request, response: Response) -> Dict[str, Any]:
+    user = db.get_user_by_username(payload.username.strip())
+    if not user or user.get("status") != "active" or not verify_password(
+        payload.password, user["password_hash"]
+    ):
+        db.add_audit(
+            user["id"] if user else None,
+            payload.username.strip(),
+            "auth.login_failed",
+            detail={"ip": request.client.host if request.client else ""},
+        )
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
+    started = _start_user_session(response, user, request)
+    return {"ok": True, "user": started}
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(request: Request, response: Response) -> Dict[str, Any]:
+    token = request.cookies.get(AUTH_COOKIE_NAME, "")
+    user = getattr(request.state, "user", None)
+    if token:
+        db.revoke_session(hash_session_token(token))
+    if user:
+        db.add_audit(user["id"], user["username"], "auth.logout")
+    response.delete_cookie(AUTH_COOKIE_NAME, path="/")
+    return {"ok": True}
+
+
+@app.get("/api/auth/me")
+async def auth_me(request: Request) -> Dict[str, Any]:
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="请先登录")
+    return {"user": public_user(user)}
+
+
+@app.post("/api/auth/change-password")
+async def change_password(
+    payload: PasswordChangePayload, request: Request, response: Response
+) -> Dict[str, Any]:
+    user = getattr(request.state, "user", None)
+    if not user or not verify_password(payload.current_password, user["password_hash"]):
+        raise HTTPException(status_code=400, detail="当前密码不正确")
+    db.update_user(user["id"], password_hash=hash_password(payload.new_password))
+    db.revoke_user_sessions(user["id"])
+    refreshed = db.get_user(user["id"])
+    assert refreshed is not None
+    _start_user_session(response, refreshed, request)
+    db.add_audit(user["id"], user["username"], "auth.password_changed")
+    return {"ok": True}
+
+
+@app.get("/api/users")
+async def list_users(request: Request) -> Dict[str, Any]:
+    _require_permission(request, "users.manage")
+    return {
+        "rows": [public_user(user) for user in db.list_users()],
+        "permissions": list(PERMISSIONS),
+        "role_permissions": ROLE_PERMISSIONS,
+        "role_labels": ROLE_LABELS,
+    }
+
+
+@app.post("/api/users")
+async def create_user(
+    payload: UserCreatePayload, request: Request
+) -> Dict[str, Any]:
+    actor = _require_permission(request, "users.manage")
+    username = _validate_username(payload.username)
+    try:
+        permissions = normalize_permissions(payload.role, payload.permissions)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        user_id = db.create_user(
+            username=username,
+            password_hash=hash_password(payload.password),
+            display_name=payload.display_name.strip() or username,
+            role=payload.role,
+            permissions=permissions,
+        )
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="用户名已存在") from exc
+    db.add_audit(actor["id"], actor["username"], "users.created", str(user_id), {"username": username})
+    created = db.get_user(user_id)
+    assert created is not None
+    return {"ok": True, "user": public_user(created)}
+
+
+@app.put("/api/users/{user_id}")
+async def update_user(
+    user_id: int, payload: UserUpdatePayload, request: Request
+) -> Dict[str, Any]:
+    actor = _require_permission(request, "users.manage")
+    target = db.get_user(user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    if actor["id"] == user_id and payload.status == "disabled":
+        raise HTTPException(status_code=400, detail="不能停用当前登录账号")
+    admins = [user for user in db.list_users() if user.get("role") == "admin" and user.get("status") == "active"]
+    demoting_last_admin = (
+        target.get("role") == "admin"
+        and ((payload.role is not None and payload.role != "admin") or payload.status == "disabled")
+        and len(admins) <= 1
+    )
+    if demoting_last_admin:
+        raise HTTPException(status_code=400, detail="系统必须保留至少一个启用的管理员")
+    role = payload.role or target["role"]
+    try:
+        permissions = (
+            normalize_permissions(role, payload.permissions)
+            if payload.permissions is not None or payload.role is not None
+            else None
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if payload.status is not None and payload.status not in {"active", "disabled"}:
+        raise HTTPException(status_code=400, detail="用户状态必须为 active 或 disabled")
+    password_hash = hash_password(payload.password) if payload.password else None
+    db.update_user(
+        user_id,
+        display_name=payload.display_name.strip() if payload.display_name is not None else None,
+        role=payload.role,
+        permissions=permissions,
+        status=payload.status,
+        password_hash=password_hash,
+    )
+    if payload.status == "disabled" or password_hash:
+        db.revoke_user_sessions(user_id)
+    db.add_audit(
+        actor["id"],
+        actor["username"],
+        "users.updated",
+        str(user_id),
+        {
+            "username": target["username"],
+            "role": payload.role,
+            "status": payload.status,
+            "password_reset": bool(payload.password),
+        },
+    )
+    updated = db.get_user(user_id)
+    assert updated is not None
+    return {"ok": True, "user": public_user(updated)}
+
+
+@app.get("/api/audit")
+async def audit_logs(request: Request, limit: int = 100) -> Dict[str, Any]:
+    _require_permission(request, "users.manage")
+    page_size = min(max(limit, 1), 500)
+    with db._lock:
+        rows = db._conn.execute(
+            "SELECT * FROM audit_logs ORDER BY id DESC LIMIT ?", (page_size,)
+        ).fetchall()
+    return {"rows": [dict(row) for row in rows]}
 
 
 @app.get("/api/stats")
@@ -236,6 +586,14 @@ async def batches(limit: int = 50, offset: int = 0) -> Dict[str, Any]:
     return {"rows": rows}
 
 
+@app.get("/api/reports/{batch_id}")
+async def batch_report(batch_id: int) -> Dict[str, Any]:
+    try:
+        return build_batch_report(db, batch_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @app.get("/api/cameras")
 async def cameras(
     status: Optional[str] = "active",
@@ -258,6 +616,8 @@ async def cameras(
     for cam in rows:
         brief = _camera_brief(cam)
         last = db.list_captures(camera_id=cam["id"], batch_id=batch_id, limit=1)
+        if last:
+            last[0].update(_capture_urls(last[0]))
         brief["last_capture"] = last[0] if last else None
         last_decision = last[0]["decision"] if last else "pending"
         if decision and last_decision != decision:
@@ -306,7 +666,10 @@ async def baseline_image(baseline_id: int) -> FileResponse:
     path = Path(row["path"])
     if not path.exists():
         raise HTTPException(status_code=404, detail="baseline file missing")
-    return FileResponse(path)
+    return FileResponse(
+        path,
+        headers={"Cache-Control": "private, max-age=86400, immutable"},
+    )
 
 
 @app.get("/api/captures")
@@ -329,10 +692,15 @@ async def captures(
         offset=page_offset,
     )
     enriched = []
+    store_cache: Dict[str, Dict[str, Any]] = {}
     for row in rows:
         cam = db.get_camera(row["camera_id"])
         row["camera"] = _camera_brief(cam) if cam else None
         row.update(_capture_urls(row))
+        if row["camera"] and decision == "review":
+            row["store_context"] = _store_context_for_camera(
+                row["camera"], batch_id, store_cache
+            )
         enriched.append(row)
     return {
         "total": db.count_captures(
@@ -345,6 +713,61 @@ async def captures(
         "offset": page_offset,
         "batch_id": batch_id,
         "rows": enriched,
+    }
+
+
+@app.get("/api/review-queue")
+async def review_queue(
+    batch_id: Optional[int] = None,
+    camera_id: Optional[int] = None,
+    query: str = "",
+    limit: int = 100,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    page_size = min(max(limit, 1), 100)
+    page_offset = max(offset, 0)
+    rows = await asyncio.to_thread(
+        db.list_capture_summaries,
+        decision="review",
+        camera_id=camera_id,
+        batch_id=batch_id,
+        query=query,
+        limit=page_size,
+        offset=page_offset,
+    )
+    total = await asyncio.to_thread(
+        db.count_captures,
+        decision="review",
+        camera_id=camera_id,
+        batch_id=batch_id,
+        query=query,
+    )
+    cameras = await asyncio.to_thread(db.list_cameras)
+    camera_map = {camera["id"]: camera for camera in cameras}
+
+    def enrich_rows() -> List[Dict[str, Any]]:
+        store_cache: Dict[str, Dict[str, Any]] = {}
+        enriched = []
+        for row in rows:
+            camera = camera_map.get(row["camera_id"])
+            row["camera"] = _camera_brief(camera) if camera else None
+            row.update(_capture_urls(row))
+            if camera:
+                row["store_context"] = _store_context_for_camera(
+                    row["camera"], batch_id, store_cache
+                )
+            enriched.append(row)
+        return enriched
+
+    enriched = await asyncio.to_thread(enrich_rows)
+    stats = await asyncio.to_thread(db.stats, batch_id)
+    return {
+        "total": total,
+        "limit": page_size,
+        "offset": page_offset,
+        "batch_id": batch_id,
+        "rows": enriched,
+        "stats": stats,
     }
 
 
@@ -365,7 +788,11 @@ async def capture_occlusion(capture_id: int) -> FileResponse:
     path = _occlusion_path(row) if row else None
     if path is None:
         raise HTTPException(status_code=404, detail="该抓图没有可用的遮挡区域图")
-    return FileResponse(path, media_type="image/png")
+    return FileResponse(
+        path,
+        media_type="image/png",
+        headers={"Cache-Control": "private, max-age=86400, immutable"},
+    )
 
 
 @app.get("/api/captures/{capture_id}/image")
@@ -376,7 +803,10 @@ async def capture_image(capture_id: int) -> FileResponse:
     path = Path(row["path"])
     if not path.exists():
         raise HTTPException(status_code=404, detail="image file missing")
-    return FileResponse(path)
+    return FileResponse(
+        path,
+        headers={"Cache-Control": "private, max-age=86400, immutable"},
+    )
 
 
 @app.get("/api/captures/{capture_id}/thumb")
@@ -387,11 +817,17 @@ async def capture_thumb(capture_id: int) -> FileResponse:
     path = Path(row["thumb_path"])
     if not path.exists():
         raise HTTPException(status_code=404, detail="thumb file missing")
-    return FileResponse(path)
+    return FileResponse(
+        path,
+        headers={"Cache-Control": "private, max-age=86400, immutable"},
+    )
 
 
 @app.post("/api/captures/{capture_id}/review")
-async def review_capture(capture_id: int, payload: ReviewPayload) -> Dict[str, Any]:
+async def review_capture(
+    capture_id: int, payload: ReviewPayload, request: Request
+) -> Dict[str, Any]:
+    actor = _require_permission(request, "review.write")
     row = db.get_capture(capture_id)
     if not row:
         raise HTTPException(status_code=404, detail="capture not found")
@@ -405,7 +841,7 @@ async def review_capture(capture_id: int, payload: ReviewPayload) -> Dict[str, A
         capture_id=capture_id,
         decision=payload.decision,
         note=payload.note,
-        reviewer=payload.reviewer,
+        reviewer=actor["username"],
         set_baseline=payload.set_baseline,
     )
     # 复核通过且要求设基准：把当前图设为该相机新基准。
@@ -421,15 +857,48 @@ async def review_capture(capture_id: int, payload: ReviewPayload) -> Dict[str, A
         row["module_results"],
         row.get("baseline_id"),
     )
+    db.add_audit(
+        actor["id"],
+        actor["username"],
+        "review.submitted",
+        str(capture_id),
+        {"decision": payload.decision, "note": payload.note},
+    )
     return {"ok": True}
 
 
 @app.post("/api/cycle/start")
-async def start_cycle() -> Dict[str, Any]:
-    if pipeline._running:
+async def start_cycle(request: Request) -> Dict[str, Any]:
+    actor = _require_permission(request, "cycle.control")
+    if not pipeline.reserve_cycle():
         return {"status": "already_running"}
-    asyncio.create_task(pipeline.run_cycle())
+    asyncio.create_task(pipeline.run_cycle(reserved=True))
+    db.add_audit(actor["id"], actor["username"], "cycle.started")
     return {"status": "started"}
+
+
+@app.post("/api/cycle/pause")
+async def pause_cycle(request: Request) -> Dict[str, Any]:
+    actor = _require_permission(request, "cycle.control")
+    result = pipeline.pause_cycle()
+    db.add_audit(actor["id"], actor["username"], "cycle.pause", detail=result)
+    return result
+
+
+@app.post("/api/cycle/resume")
+async def resume_cycle(request: Request) -> Dict[str, Any]:
+    actor = _require_permission(request, "cycle.control")
+    result = pipeline.resume_cycle()
+    db.add_audit(actor["id"], actor["username"], "cycle.resume", detail=result)
+    return result
+
+
+@app.post("/api/cycle/stop")
+async def stop_cycle(request: Request) -> Dict[str, Any]:
+    actor = _require_permission(request, "cycle.control")
+    result = pipeline.stop_cycle()
+    db.add_audit(actor["id"], actor["username"], "cycle.stop", detail=result)
+    return result
 
 
 @app.get("/api/cycle/status")
@@ -451,7 +920,9 @@ async def cycle_progress() -> Dict[str, Any]:
 
 
 @app.post("/api/demo/seed")
-async def demo_seed() -> Dict[str, Any]:
+async def demo_seed(request: Request) -> Dict[str, Any]:
+    actor = _require_permission(request, "maintenance.run")
+    db.add_audit(actor["id"], actor["username"], "maintenance.demo_seeded")
     return seed_demo(db, config)
 
 
@@ -475,7 +946,8 @@ async def settings() -> Dict[str, Any]:
 
 
 @app.put("/api/settings")
-async def update_settings(payload: SettingsPayload) -> Dict[str, Any]:
+async def update_settings(payload: SettingsPayload, request: Request) -> Dict[str, Any]:
+    actor = _require_permission(request, "settings.write")
     updated_thresholds = config.thresholds
     updated_modules = dict(config.module_switches)
     updated_prompts = dict(config.vlm_prompts)
@@ -600,6 +1072,19 @@ async def update_settings(payload: SettingsPayload) -> Dict[str, Any]:
     if payload.sample_size is not None:
         db.set_setting("cycle_sample_size", updated_sample_size)
         config.sample_size = updated_sample_size
+    db.add_audit(
+        actor["id"],
+        actor["username"],
+        "settings.updated",
+        detail={
+            "pipeline_mode": config.pipeline_mode,
+            "concurrency": config.concurrency,
+            "capture_concurrency": config.capture_concurrency,
+            "inference_concurrency": config.inference_concurrency,
+            "capture_interval": config.capture_interval,
+            "sample_size": config.sample_size,
+        },
+    )
     return {
         "ok": True,
         "thresholds": config.thresholds,

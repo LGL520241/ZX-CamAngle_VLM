@@ -5,10 +5,38 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>CamAngle · AI 巡检控制台</title>
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
-  <link rel="stylesheet" href="/static/style.css?v=20261124e" />
+  <link rel="stylesheet" href="/static/style.css?v=20261126g" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
-<body>
+<body class="auth-pending">
+  <section id="authScreen" class="auth-screen hidden" aria-label="账号登录">
+    <div class="auth-card">
+      <div class="auth-brand">
+        <span class="brand-mark">C</span>
+        <div><strong>CamAngle</strong><small>多人巡检审核平台</small></div>
+      </div>
+      <div class="auth-copy">
+        <p class="eyebrow">SECURE ACCESS</p>
+        <h1 id="authTitle">登录巡检平台</h1>
+        <p id="authSubtitle">使用账号登录后，根据角色权限访问检测、复核和运行配置。</p>
+      </div>
+      <form id="loginForm" class="auth-form">
+        <label><span>用户名</span><input id="loginUsername" name="username" autocomplete="username" required /></label>
+        <label><span>密码</span><input id="loginPassword" name="password" type="password" autocomplete="current-password" required /></label>
+        <button class="btn primary auth-submit" type="submit">登录</button>
+      </form>
+      <form id="setupForm" class="auth-form" hidden>
+        <p class="auth-setup-note">首次使用需要创建系统管理员。该入口仅在系统没有任何用户时开放。</p>
+        <label><span>管理员用户名</span><input id="setupUsername" autocomplete="username" minlength="3" maxlength="32" required /></label>
+        <label><span>显示名称</span><input id="setupDisplayName" maxlength="40" /></label>
+        <label><span>管理员密码</span><input id="setupPassword" type="password" autocomplete="new-password" minlength="8" required /></label>
+        <label><span>确认密码</span><input id="setupPasswordConfirm" type="password" autocomplete="new-password" minlength="8" required /></label>
+        <button class="btn primary auth-submit" type="submit">创建管理员并进入系统</button>
+      </form>
+      <p id="authError" class="auth-error" hidden></p>
+    </div>
+  </section>
+
   <div class="app-shell">
     <aside class="sidebar">
       <div class="brand">
@@ -25,8 +53,10 @@
         <button data-page="cameras"><span>▦</span>相机节点</button>
         <button data-page="captures"><span>▤</span>抓图记录</button>
         <button data-page="review"><span>◎</span>人工复核 <b id="reviewBadge" class="badge">0</b></button>
+        <button data-page="reports"><span>▥</span>巡检报告</button>
         <p class="nav-label">系统</p>
-        <button data-page="settings"><span>⚙</span>运行设置</button>
+        <button id="settingsNav" data-page="settings"><span>⚙</span>运行设置</button>
+        <button id="usersNav" data-page="users" hidden><span>♙</span>用户与权限</button>
       </nav>
 
       <div class="sidebar-footer">
@@ -36,6 +66,10 @@
             <b id="sysState">系统在线</b>
             <small>广东大区 · 实时同步</small>
           </div>
+        </div>
+        <div class="sidebar-user">
+          <div><b id="currentUserName">未登录</b><small id="currentUserRole">-</small></div>
+          <button id="logoutButton" class="sidebar-logout" type="button">退出</button>
         </div>
         <small class="version">CamAngle Console · v0.2</small>
       </div>
@@ -100,6 +134,11 @@
             <div class="head-status">
               <span class="chip"><i class="dot ok"></i><span id="headCycleState">空闲</span></span>
               <span class="chip"><i class="dot warn"></i>待复核 <b id="headReview">0</b></span>
+            </div>
+            <div class="cycle-controls">
+              <button id="pauseCycle" class="btn cycle-control-button" type="button" hidden>暂停</button>
+              <button id="resumeCycle" class="btn good cycle-control-button" type="button" hidden>继续</button>
+              <button id="stopCycle" class="btn bad cycle-control-button" type="button" hidden>停止</button>
             </div>
             <button id="startCycle" class="btn primary start-cycle" type="button">
               <span class="start-cycle-icon" aria-hidden="true">▶</span>
@@ -330,6 +369,79 @@
         </div>
         <div id="reviewList" class="review-list"></div>
         <div id="reviewPagination" class="pagination" aria-label="人工复核分页"></div>
+      </section>
+
+      <!-- 巡检报告 -->
+      <section id="page-reports" class="page report-page">
+        <header class="page-head">
+          <div>
+            <p class="eyebrow">INSPECTION REPORT</p>
+            <h1>巡检结果报告</h1>
+            <p class="subtitle">按时间段查看整体结论、门店风险和异常原因分布。</p>
+          </div>
+          <div class="report-actions">
+            <span id="reportScopeLabel" class="chip"><i class="dot ok"></i>当前批次</span>
+            <button id="refreshReport" class="btn" type="button">刷新报告</button>
+          </div>
+        </header>
+        <div id="reportSummary" class="report-summary-grid"></div>
+        <div class="report-chart-grid">
+          <section class="panel report-chart-panel">
+            <div class="panel-head"><div><h2>判定分布</h2><p>当前报告各判定数量</p></div></div>
+            <div class="report-chart-wrap"><canvas id="reportDecisionChart"></canvas></div>
+          </section>
+          <section class="panel report-chart-panel">
+            <div class="panel-head"><div><h2>门店风险分布</h2><p>按不合格与待复核通道数排序</p></div></div>
+            <div class="report-chart-wrap"><canvas id="reportStoreChart"></canvas></div>
+          </section>
+        </div>
+        <div class="report-detail-grid">
+          <section class="panel">
+            <div class="panel-head"><div><h2>门店明细</h2><p>当前批次各门店检查结果</p></div></div>
+            <div id="reportStoreTable" class="report-table-wrap"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><div><h2>主要异常原因</h2><p>出现频率最高的问题说明</p></div></div>
+            <div id="reportReasons" class="report-reasons"></div>
+          </section>
+        </div>
+      </section>
+
+      <!-- 用户与权限 -->
+      <section id="page-users" class="page users-page">
+        <header class="page-head">
+          <div>
+            <p class="eyebrow">USERS &amp; ACCESS</p>
+            <h1>用户与权限</h1>
+            <p class="subtitle">创建审核账号，并分别控制运行、配置、复核和用户管理权限。</p>
+          </div>
+        </header>
+        <div class="users-layout">
+          <section class="panel user-editor-panel">
+            <div class="panel-head">
+              <div><h2 id="userEditorTitle">新建用户</h2><p>角色提供默认权限，也可以按账号单独调整。</p></div>
+              <button id="cancelUserEdit" class="btn" type="button" hidden>取消编辑</button>
+            </div>
+            <form id="userEditorForm" class="user-editor-form">
+              <label><span>用户名</span><input id="userUsername" autocomplete="off" minlength="3" maxlength="32" required /></label>
+              <label><span>显示名称</span><input id="userDisplayName" maxlength="40" /></label>
+              <label><span>角色</span><select id="userRole"><option value="reviewer">审核员</option><option value="operator">巡检操作员</option><option value="admin">系统管理员</option><option value="viewer">只读查看员</option></select></label>
+              <label><span id="userPasswordLabel">初始密码</span><input id="userPassword" type="password" autocomplete="new-password" minlength="8" /></label>
+              <div class="user-permission-grid">
+                <label><input id="permUsers" type="checkbox" /> <span>用户与权限管理</span></label>
+                <label><input id="permSettings" type="checkbox" /> <span>修改运行配置</span></label>
+                <label><input id="permCycle" type="checkbox" /> <span>开始、暂停和停止检测</span></label>
+                <label><input id="permReview" type="checkbox" /> <span>提交人工复核</span></label>
+                <label><input id="permMaintenance" type="checkbox" /> <span>维护与演示数据操作</span></label>
+              </div>
+              <button id="saveUser" class="btn primary" type="submit">创建用户</button>
+            </form>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><div><h2>账号列表</h2><p>停用账号会立即撤销现有登录会话。</p></div></div>
+            <div id="userList" class="user-list"></div>
+          </section>
+        </div>
       </section>
 
       <!-- 设置 -->
@@ -690,11 +802,11 @@
         <div class="detail-case-nav" aria-label="抓图记录切换">
           <button id="detailPrev" class="btn detail-nav-button previous" type="button" aria-label="查看上一条抓图记录">
             <span class="detail-nav-arrow" aria-hidden="true">←</span>
-            <span>上一条抓图</span>
+            <span id="detailPrevText">上一条复核</span>
           </button>
           <span id="detailNavPosition" class="detail-nav-position">1 / 1</span>
           <button id="detailNext" class="btn detail-nav-button next" type="button" aria-label="查看下一条抓图记录">
-            <span>下一条抓图</span>
+            <span id="detailNextText">下一条复核</span>
             <span class="detail-nav-arrow" aria-hidden="true">→</span>
           </button>
         </div>
@@ -703,9 +815,16 @@
       <p id="detailNavHint" class="detail-nav-hint">可在当前筛选结果中连续查看，键盘 ← → 也可以切换。</p>
       <div class="compare">
         <figure>
-          <figcaption>当前抓图</figcaption>
+          <figcaption id="detailCurrentCaption">当前抓图</figcaption>
           <div class="capture-image-stage">
             <img id="detailImage" alt="当前抓图" />
+            <div id="detailImageEmpty" class="detail-image-empty" hidden>
+              <span class="detail-image-empty-icon" aria-hidden="true">▧</span>
+              <div>
+                <b>本次未获取到画面</b>
+                <p id="detailImageEmptyReason">设备抓图失败，请结合判定原因和门店其他通道判断。</p>
+              </div>
+            </div>
             <img id="detailOcclusionMask" class="occlusion-overlay" alt="疑似遮挡区域标注" hidden />
           </div>
           <label id="detailOcclusionToggleWrap" class="occlusion-toggle" hidden><input id="detailOcclusionToggle" type="checkbox" checked />显示疑似遮挡区域<span>红色为算法标注区域</span></label>
@@ -713,6 +832,17 @@
         </figure>
         <figure><figcaption>基准图</figcaption><img id="detailBaseline" alt="基准图" /></figure>
       </div>
+      <section id="detailStoreContext" class="detail-store-context" hidden>
+        <div class="detail-store-context-head">
+          <div><h3>同门店其他通道</h3><p id="detailStoreContextMeta">用于参考同一门店其他摄像头的当前检查结果</p></div>
+          <div class="detail-store-nav">
+            <button id="detailStorePrev" type="button">← 同店上一路</button>
+            <span id="detailStorePosition">1 / 1</span>
+            <button id="detailStoreNext" type="button">同店下一路 →</button>
+          </div>
+        </div>
+        <div id="detailStoreContextList" class="detail-store-context-list"></div>
+      </section>
       <div id="detailInfo" class="detail-info"></div>
     </div>
   </div>
@@ -744,6 +874,6 @@
   </div>
 
   <div id="toast" class="toast hidden"></div>
-  <script src="/static/app.js?v=20261124e"></script>
+  <script src="/static/app.js?v=20261126g"></script>
 </body>
 </html>
